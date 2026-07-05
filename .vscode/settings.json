@@ -1,7 +1,0 @@
-{
-    "python.defaultInterpreterPath": ".venv/bin/python",
-    "python.terminal.activateEnvironment": true,
-    "python.envFile": "${workspaceFolder}/.env",
-    "editor.formatOnSave": true,
-    "python.analysis.typeCheckingMode": "basic"
-}
