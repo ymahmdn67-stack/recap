@@ -1,3 +1,35 @@
+import sys
+import subprocess
+
+# --- 1. قسم الفحص والتثبيت التلقائي ---
+def ensure_playwright_ready():
+    try:
+        import playwright
+    except ImportError:
+        print("📦 مكتبة Playwright غير مثبتة. جاري التثبيت الآن...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+        print("✅ تم تثبيت مكتبة بايثون بنجاح.")
+
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser.close()
+    except Exception:
+        print("⚙️ المتصفحات أو ملفات النظام ناقصة. جاري تحميلها وتثبيتها تلقائياً...")
+        print("(قد تستغرق هذه العملية دقيقة أو دقيقتين، يرجى الانتظار...)")
+        try:
+            subprocess.check_call([sys.executable, "-m", "playwright", "install", "--with-deps"])
+            print("✅ تم تجهيز المتصفحات وملفات النظام بنجاح!")
+        except Exception as install_error:
+            print(f"❌ فشل التثبيت التلقائي بسبب: {install_error}")
+            sys.exit(1)
+
+# تشغيل الفحص الذكي قبل بدء الكود الأساسي
+ensure_playwright_ready()
+
+
+# --- 2. الكود الأساسي بعد التعديل ---
 from playwright.sync_api import sync_playwright
 import re
 
@@ -5,35 +37,33 @@ TOKEN = None
 
 def handle_response(response):
     global TOKEN
-    # التحقق من أن الرابط يحتوي على نقطة النهاية المطلوبة
-    if "recaptcha/enterprise/reload" in response.url:
+    # التعديل الأول: البحث عن api2 بدلاً من enterprise
+    if "recaptcha/api2/reload" in response.url:
         try:
-            # Playwright يقوم بفك الضغط (gzip) وفك التشفير تلقائياً
             body = response.text()
             m = re.search(r'rresp","(.+?)"', body)
             if m:
                 TOKEN = m.group(1)
-        except Exception as e:
-            # تجاهل الأخطاء في حال كانت الاستجابة غير قابلة للقراءة
+        except Exception:
             pass
 
 def main():
     with sync_playwright() as p:
-        # تشغيل المتصفح
-        browser = p.chromium.launch(headless=True)
+        # ملاحظة: تم ترك headless=True ليعمل في الخلفية، يمكنك تغييرها لـ False إذا أردت رؤية المتصفح
+        browser = p.chromium.launch(headless=True) 
         page = browser.new_page()
         
-        # توجيه المتصفح للاستماع إلى جميع الاستجابات وتمريرها للدالة
         page.on("response", handle_response)
         
-        print("جاري فتح الصفحة والانتظار لالتقاط التوكن...")
-        page.goto("https://recaptcha-demo.appspot.com/recaptcha-v2-invisible.php")
+        print("\nجاري فتح الصفحة والانتظار لالتقاط التوكن...")
+        # التعديل الثاني: تغيير الرابط إلى الموقع المطلوب
+        page.goto("https://greenmethods.com/my-account/")
         
-        # حلقة انتظار ذكية لا تجمد البرنامج
+        # حلقة الانتظار حتى التقاط التوكن
         while TOKEN is None:
-            page.wait_for_timeout(1000) # الانتظار لمدة ثانية واحدة
+            page.wait_for_timeout(1000)
             
-        print("\nتم الالتقاط بنجاح!")
+        print("\n🎉 تم التقاط التوكن بنجاح من الموقع الجديد!")
         print("TOKEN =", TOKEN)
         
         browser.close()
