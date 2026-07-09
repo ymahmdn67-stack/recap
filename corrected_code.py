@@ -1,5 +1,3 @@
-import sys
-import subprocess
 import asyncio
 import re
 import os
@@ -30,40 +28,7 @@ USER_AGENTS = [
 ]
 
 
-# --- 1. قسم الفحص والتثبيت الصامت لـ Playwright ---
-def ensure_playwright_ready():
-    """التحقق من تثبيت Playwright وتثبيته إذا لزم الأمر"""
-    try:
-        import playwright
-        logger.info("Playwright is already installed")
-    except ImportError:
-        logger.info("Installing Playwright...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
-        except Exception as e:
-            logger.error(f"Failed to install Playwright: {e}")
-            sys.exit(1)
-
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            browser.close()
-        logger.info("Playwright browsers are ready")
-    except Exception as e:
-        logger.warning(f"Playwright browsers not installed, installing... {e}")
-        try:
-            subprocess.check_call([sys.executable, "-m", "playwright", "install", "--with-deps"])
-            logger.info("Playwright browsers installed successfully")
-        except Exception as install_error:
-            logger.error(f"Failed to install Playwright browsers: {install_error}")
-            sys.exit(1)
-
-
-ensure_playwright_ready()
-
-
-# --- 2. دالة استخراج التوكن مع معالجة صحيحة ---
+# --- 1. دالة استخراج التوكن مع معالجة صحيحة ---
 async def get_captcha_token(timeout_seconds: int = 30) -> Optional[str]:
     """
     استخراج توكن reCAPTCHA من الموقع
@@ -134,7 +99,7 @@ async def get_captcha_token(timeout_seconds: int = 30) -> Optional[str]:
                 logger.debug(f"Error closing browser: {e}")
 
 
-# --- 3. دالة توليد بريد إلكتروني صحيح ---
+# --- 2. دالة توليد بريد إلكتروني صحيح ---
 def generate_valid_email() -> str:
     """توليد بريد إلكتروني صحيح من الناحية الفنية"""
     fake = Faker("en_UK")
@@ -154,7 +119,7 @@ def generate_valid_email() -> str:
     return email
 
 
-# --- 4. دالة الحصول على كلمة المرور من متغيرات البيئة ---
+# --- 3. دالة الحصول على كلمة المرور من متغيرات البيئة ---
 def get_password() -> Optional[str]:
     """الحصول على كلمة المرور من متغيرات البيئة"""
     password = os.getenv('ACCOUNT_PASSWORD')
@@ -167,13 +132,13 @@ def get_password() -> Optional[str]:
     return password
 
 
-# --- 5. دالة الحصول على User-Agent عشوائي ---
+# --- 4. دالة الحصول على User-Agent عشوائي ---
 def get_random_user_agent() -> str:
     """اختيار user-agent عشوائي من قائمة موثوقة"""
     return random.choice(USER_AGENTS)
 
 
-# --- 6. دالة استخراج Nonce مع التحقق ---
+# --- 5. دالة استخراج Nonce مع التحقق ---
 def extract_nonce(html_content: str, nonce_name: str) -> Optional[str]:
     """
     استخراج nonce من محتوى HTML
@@ -197,7 +162,7 @@ def extract_nonce(html_content: str, nonce_name: str) -> Optional[str]:
         return None
 
 
-# --- 7. الدالة الأساسية للربط والتسجيل ---
+# --- 6. الدالة الأساسية للربط والتسجيل ---
 async def main():
     """الدالة الرئيسية لتنفيذ عملية التسجيل"""
     try:
