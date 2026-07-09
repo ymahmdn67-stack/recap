@@ -1,1 +1,4 @@
 playwright
+user_agent
+faker
+curl_cffi
