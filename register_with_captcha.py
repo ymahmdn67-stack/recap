@@ -2,13 +2,12 @@ import re
 import time
 from faker import Faker
 from playwright.sync_api import sync_playwright
-from playwright_stealth import Stealth  # استيراد الكلاس الحديث للإصدار 2.0+
+from playwright_stealth import Stealth
 
 # --- 1. إعداد البيانات العشوائية المتجددة تلقائياً ---
 fake = Faker("en_UK")
 f = fake.first_name()
 l = fake.last_name()
-# إضافة أرقام عشوائية لضمان عدم تكرار البريد الإلكتروني في السيرفر مطلقاً
 email_address = f"{f.lower()}.{l.lower()}{fake.random_int(min=100, max=999)}@gmail.com"
 password_string = "Willia5766ms#123CR7"
 
@@ -20,7 +19,7 @@ print(f"[*] البيانات التخيلية للحساب الجديد:\n 📧 
 with Stealth().use_sync(sync_playwright()) as p:
     print("[*] جاري تشغيل المتصفح المتخفي بالكامل (Headless)...")
     browser = p.chromium.launch(
-        headless=True, # يعطي أفضل وأسرع أداء داخل الـ VPS و GitHub Codespaces
+        headless=True,
         args=[
             '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
@@ -35,16 +34,19 @@ with Stealth().use_sync(sync_playwright()) as p:
     page = context.new_page()
     
     print("[*] جاري فتح صفحة الحساب الرئيسي...")
-    page.goto("https://greenmethods.com/my-account/", wait_until="networkidle")
+    # ✅ التعديل الحاسم: تم تغيير wait_until إلى domcontentloaded وإضافة timeout ممتد لتفادي الحظر والانتظار اللانهائي
+    page.goto(
+        "https://greenmethods.com/my-account/", 
+        wait_until="domcontentloaded", 
+        timeout=60000
+    )
     
     # 3. ملء بيانات نموذج التسجيل لـ WooCommerce
     print("[*] جاري محاكاة كتابة البيانات داخل النموذج آلياً...")
     
-    # تحديد حقل البريد الإلكتروني المخصص للتسجيل وملؤه
     page.locator("input#reg_email, input[name='email']").first.fill(email_address)
-    page.wait_for_timeout(600)  # تأخير بشري طفيف جداً للمحاكاة والتخفي
+    page.wait_for_timeout(600)  # تأخير بشري طفيف للمحاكاة والتخفي
     
-    # تحديد حقل كلمة المرور وملؤه
     page.locator("input#reg_password, input[name='password']").first.fill(password_string)
     page.wait_for_timeout(1000)
     
@@ -53,19 +55,22 @@ with Stealth().use_sync(sync_playwright()) as p:
     register_button = page.locator("button[name='register'], input[name='register'], button:has-text('Register')").first
     register_button.click()
     
-    print("[*] في انتظار استجابة السيرفر وتحديث الجلسة (انتظار 6 ثوانٍ)...")
-    page.wait_for_timeout(6000)
+    print("[*] في انتظار استجابة السيرفر وتحديث الجلسة (انتظار 8 ثوانٍ)...")
+    page.wait_for_timeout(8000)
     
     # 5. فحص محتوى الصفحة للتأكد من نجاح العملية واقتناص الـ Nonces
     html_content = page.content()
     
-    # إذا ظهر رابط أو زر تسجيل الخروج، فهذا يعني أن الجلسة حية وتم إنشاء الحساب بنجاح
     if "logout" in html_content.lower() or "customer-logout" in html_content.lower():
         print("[🎉] مبروك! تم تخطي الحماية الحية والتسجيل في السيرفر بنجاح كامل عبر المتصفح المتخفي.")
         
         # 6. الانتقال مباشرة لصفحة الفواتير حاملاً نفس كوكيز الجلسة الناجحة لحصد الـ Nonce
         print("[*] جاري الانتقال الذاتي لصفحة الفواتير الحصرية لحصد الـ Nonce...")
-        page.goto("https://greenmethods.com/my-account/edit-address/billing/", wait_until="networkidle")
+        page.goto(
+            "https://greenmethods.com/my-account/edit-address/billing/", 
+            wait_until="domcontentloaded",
+            timeout=60000
+        )
         
         billing_html = page.content()
         address_nonce = re.search(r'name="woocommerce-edit-address-nonce" value="([^"]+)"', billing_html)
@@ -77,11 +82,10 @@ with Stealth().use_sync(sync_playwright()) as p:
             
     else:
         print("[-] فشل السيرفر في قبول التسجيل. جاري فحص واجهة المستخدم لمعرفة السبب...")
-        # فحص إذا ما كانت هناك رسالة خطأ صريحة من ووردبريس وطباعتها لتشخيصها
         if page.locator(".woocommerce-error").count() > 0:
             error_messages = page.locator(".woocommerce-error").text_content()
             print(f" ⚠️ رسالة السيرفر: {error_messages.strip()}")
         else:
-            print(" ⚠️ لا توجد رسالة خطأ واضحة في الواجهة، قد تكون الحماية الصارمة قد حظرت الطلب.")
+            print(" ⚠️ لا توجد رسالة خطأ واضحة في الواجهة، قد تكون الحماية الصارمة قد حظرت الطلب تماماً.")
 
     browser.close()
