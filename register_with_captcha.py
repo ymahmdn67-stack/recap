@@ -28,7 +28,7 @@ with Stealth().use_sync(sync_playwright()) as p:
     # اعتراض الشبكة لاقتناص التوكن
     def intercept_response(response):
         global captured_token
-        if "recaptcha/enterprise/reload" in response.url:
+        if "recaptcha/api2/reload" in response.url:
             try:
                 body = response.text()
                 match = re.search(r'rresp","(.+?)"', body) or re.search(r'rresp Trimmed","(.+?)"', body)
