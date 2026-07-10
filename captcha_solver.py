@@ -8,7 +8,7 @@ def check_network_response(response):
     global CAPTCHA_TOKEN
     
     # الفحص الحصري لطلب الكابتشا الذي حددته فقط
-    if "recaptcha/api2/reload" in response.url:
+    if "recaptcha/api2/userverify" in response.url:
         try:
             body = response.text()
             # استخدام الـ Regex الخاص بك للاستخراج المباشر
