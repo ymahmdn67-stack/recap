@@ -7,19 +7,19 @@ import requests
 from faker import Faker
 from playwright.sync_api import sync_playwright
 
-# إعداد مكتبة Faker لتوليد البيانات العشوائية للمستخدم
+BASE_URL = "https://greenmethods.com"
+DOMAIN = "greenmethods.com"
+
 fake = Faker("en_UK")
 f = fake.first_name()
 l = fake.last_name()
 k = f"{f} {l}"
 e = f"{f.lower()}.{l.lower()}@gmail.com"
 
-# تعريف المتغير العام لحفظ التوكن باسم cap كما هو مطلوب
 cap = None
 
 def check_network_response(response):
     global cap
-    # فحص استجابات الشبكة لالتقاط التوكن الخاص بالكابتشا
     if "recaptcha/api2/reload" in response.url:
         try:
             body = response.text()
@@ -42,33 +42,26 @@ def fetch_captcha_token():
         page = context.new_page()
         page.on("response", check_network_response)
         
-        print("🚀 جاري فتح الصفحة لالتقاط التوكن...")
-        page.goto("https://example.com/my-account/", wait_until="commit")
+        page.goto(f"{BASE_URL}/my-account/", wait_until="commit")
         
-        # محاكاة حركة الماوس البرمجية لإتمام التفاعل الطبيعي
         page.mouse.move(100, 100)
         page.wait_for_timeout(500)
         page.mouse.move(250, 300)
         
-        # الانتظار في حلقة تكرارية ذكية حتى يتم التقاط التوكن
         while cap is None:
             page.wait_for_timeout(500)
             
-        print("\n🎉 تم التقاط التوكن بنجاح وبأعلى موثوقية!")
         browser.close()
     return cap
 
 def main():
     global cap
     
-    # 1. تشغيل Playwright أولاً لاستخراج قيمة التوكن وإسنادها للمتغير cap
     cap = fetch_captcha_token()
-    
-    # 2. بدء جلسة HTTP Requests واستخدام التوكن المستخرج
     r = requests.Session()
     
     headers_get = {
-        'authority': 'example.com',
+        'authority': DOMAIN,
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
         'cache-control': 'max-age=0',
@@ -83,7 +76,7 @@ def main():
         'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36',
     }
     
-    response = r.get('https://example.com/my-account/', headers=headers_get)
+    response = r.get(f'{BASE_URL}/my-account/', headers=headers_get)
     
     non_register = re.search(
         r'name="woocommerce-register-nonce"[^>]*value="([^"]+)"',
@@ -93,18 +86,15 @@ def main():
     register_nonce_val = ""
     if non_register:
         register_nonce_val = non_register.group(1)
-        print(f"Register Nonce: {register_nonce_val}")
-    else:
-        print("Register Nonce not found")
     
     headers_post = {
-        'authority': 'example.com',
+        'authority': DOMAIN,
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
         'cache-control': 'max-age=0',
         'content-type': 'application/x-www-form-urlencoded',
-        'origin': 'https://example.com',
-        'referer': 'https://example.com/my-account/',
+        'origin': BASE_URL,
+        'referer': f'{BASE_URL}/my-account/',
         'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
         'sec-ch-ua-mobile': '?1',
         'sec-ch-ua-platform': '"Android"',
@@ -119,7 +109,7 @@ def main():
     data = {
         'email': e,
         'password': 'Willia5766ms#123CR7',
-        'g-recaptcha-response': cap,  # استخدام التوكن الممرر هنا
+        'g-recaptcha-response': cap,
         'wc_order_attribution_source_type': 'typein',
         'wc_order_attribution_referrer': '(none)',
         'wc_order_attribution_utm_campaign': '(none)',
@@ -131,7 +121,7 @@ def main():
         'wc_order_attribution_utm_source_platform': '(none)',
         'wc_order_attribution_utm_creative_format': '(none)',
         'wc_order_attribution_utm_marketing_tactic': '(none)',
-        'wc_order_attribution_session_entry': 'https://example.com/my-account/',
+        'wc_order_attribution_session_entry': f'{BASE_URL}/my-account/',
         'wc_order_attribution_session_start_time': '2026-07-09 22:38:43',
         'wc_order_attribution_session_pages': '2',
         'wc_order_attribution_session_count': '1',
@@ -141,13 +131,13 @@ def main():
         'register': 'Register',
     }
     
-    response = r.post('https://example.com/my-account/', headers=headers_post, data=data)
+    response = r.post(f'{BASE_URL}/my-account/', headers=headers_post, data=data)
     
     headers_billing = {
-        'authority': 'example.com',
+        'authority': DOMAIN,
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
-        'referer': 'https://example.com/my-account/edit-address/',
+        'referer': f'{BASE_URL}/my-account/edit-address/',
         'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
         'sec-ch-ua-mobile': '?1',
         'sec-ch-ua-platform': '"Android"',
@@ -159,17 +149,12 @@ def main():
         'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36',
     }
     
-    response = r.get('https://example.com/my-account/edit-address/billing/', headers=headers_billing)
+    response = r.get(f'{BASE_URL}/my-account/edit-address/billing/', headers=headers_billing)
     
     non_billing = re.search(
         r'name="woocommerce-edit-address-nonce" value="([^"]+)"',
         response.text
     )
-    
-    if non_billing:
-        print(f"Billing Nonce: {non_billing.group(1)}")
-    else:
-        print("Billing Nonce not found")
 
 if __name__ == "__main__":
     main()
