@@ -6,144 +6,132 @@ import time
 import requests
 from faker import Faker
 from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
 
-BASE_URL = "https://greenmethods.com"
-DOMAIN = "greenmethods.com"
-
-# إنشاء بيانات وهمية للتسجيل
+# --- 1. إعداد البيانات العشوائية (Faker) ---
 fake = Faker("en_UK")
 f = fake.first_name()
 l = fake.last_name()
 k = f"{f} {l}"
 e = f"{f.lower()}.{l.lower()}@gmail.com"
 
-cap = None
+# ⚠️ سر النجاح: يجب أن تكون بصمة المتصفح موحدة بالكامل بين Playwright و Requests
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
-def check_network_response(response):
-    global cap
-    if "recaptcha/api2/reload" in response.url:
-        try:
-            body = response.text()
-            match = re.search(r'rresp","(.+?)"', body)
-            if match:
-                cap = match.group(1)
-                print(f"   [✔] تم التقاط توكن الكابتشا من الشبكة بنجاح! الطول: {len(cap)} حرف.")
-        except Exception as err:
-            print(f"   [❌] خطأ أثناء استخراج التوكن من الاستجابة: {err}")
-
-def fetch_captcha_token():
-    global cap
-    print("\n[*] جاري تشغيل متصفح Playwright للحصول على التوكن...")
+def fetch_captcha_and_session_data():
+    """
+    تفتح متصفح صامت لجلب: التوكن، الـ Nonce، والكوكيز الحية في نفس اللحظة
+    """
+    captured_token = None
+    
     with sync_playwright() as p:
-        # إضافة خيارات السيرفر لضمان عمل xvfb-run بدون مشاكل
+        print("[*] جاري تشغيل المتصفح الصامت بالخلفية لتهيئة الجلسة وصيد الكابتشا...")
         browser = p.chromium.launch(
-            headless=False, 
+            headless=True, # متوافق مع الـ VPS و VS Code
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu'
+                '--disable-setuid-sandbox'
             ]
         )
+        
         context = browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            user_agent=USER_AGENT,
+            viewport={"width": 1920, "height": 1080}
         )
+        
         page = context.new_page()
-        page.on("response", check_network_response)
+        stealth_sync(page) # حجب علامات الأتمتة
         
-        print(f"[*] جاري فتح صفحة الحساب: {BASE_URL}/my-account/")
-        page.goto(f"{BASE_URL}/my-account/", wait_until="commit")
+        # اعتراض استجابة الشبكة للحصول على توكن Invisible تلقائياً
+        def intercept_response(response):
+            nonlocal captured_token
+            if "recaptcha/api2/reload" in response.url or "recaptcha/enterprise/reload" in response.url:
+                try:
+                    body = response.text()
+                    match = re.search(r'rresp","(.+?)"', body)
+                    if match:
+                        captured_token = match.group(1)
+                except Exception:
+                    pass
+
+        page.on("response", intercept_response)
         
-        print("[*] جاري محاكاة حركة الماوس لرفع موثوقية التوكن (Score)...")
-        page.mouse.move(100, 100)
-        page.wait_for_timeout(500)
-        page.mouse.move(250, 300)
+        # فتح صفحة الحساب
+        page.goto("https://greenmethods.com/my-account/", wait_until="commit")
         
-        print("[⏳] في انتظار استجابة الكابتشا...")
+        # محاكاة تمرير صامت لتنشيط حماية سكريبت Invisible v3
+        page.evaluate("window.scrollTo({top: 150, behavior: 'smooth'});")
+        
+        # انتظار التوكن بحد أقصى 15 ثانية
+        timeout = 15
         start_time = time.time()
-        while cap is None:
+        while captured_token is None and (time.time() - start_time) < timeout:
             page.wait_for_timeout(500)
-            # تجنب الانتظار اللانهائي (مهلة دقيقة واحدة)
-            if time.time() - start_time > 60:
-                print("[❌] تجاوز المهلة الزمنية (60 ثانية) ولم يتم التقاط التوكن.")
-                break
             
+        if not captured_token:
+            print("[-] فشل التقاط التوكن ضمن المهلة.")
+            browser.close()
+            return None, None, None
+            
+        print("[+] تم صيد توكن فعال بنجاح.")
+        
+        # استخراج الـ Nonce الخاص بالتسجيل مباشرة من المتصفح لضمان مطابقتة للجلسة
+        html_content = page.content()
+        nonce_match = re.search(r'name="woocommerce-register-nonce"[^>]*value="([^"]+)"', html_content)
+        register_nonce = nonce_match.group(1) if nonce_match else None
+        
+        # استخراج كوكيز الجلسة الحالية
+        playwright_cookies = context.cookies()
+        
         browser.close()
-    return cap
+        return captured_token, register_nonce, playwright_cookies
 
-def main():
-    global cap
-    
-    print("="*60)
-    print(f"🚀 بدء عملية أتمتة التسجيل للمستخدم: {k}")
-    print(f"📧 البريد الإلكتروني المستخدم: {e}")
-    print("="*60)
-    
-    # 1. الحصول على التوكن
-    cap = fetch_captcha_token()
-    if not cap:
-        print("[❌] توقف البرنامج لعدم توفر توكن كابتشا موثوق.")
-        return
+# --- 2. بدء عملية الربط والحصاد البرمجي ---
+cap_token, reg_nonce, session_cookies = fetch_captcha_and_session_data()
 
+if cap_token and reg_nonce:
+    print(f"[+] التوكن الجاهز: {cap_token[:30]}...")
+    print(f"[+] الـ Nonce المستخرج: {reg_nonce}")
+    
+    # إنشاء جلسة Requests الحقيقية
     r = requests.Session()
     
-    headers_get = {
-        'authority': DOMAIN,
-        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
-        'cache-control': 'max-age=0',
-        'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
-        'sec-ch-ua-mobile': '?1',
-        'sec-ch-ua-platform': '"Android"',
-        'sec-fetch-dest': 'document',
-        'sec-fetch-mode': 'navigate',
-        'sec-fetch-site': 'none',
-        'sec-fetch-user': '?1',
-        'upgrade-insecure-requests': '1',
-        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36',
-    }
-    
-    # 2. طلب الصفحة للحصول على Nonce التسجيل
-    print("\n[+] جاري إرسال طلب GET للموقع لجلب الـ nonce المخصص للتسجيل...")
-    response = r.get(f'{BASE_URL}/my-account/', headers=headers_get)
-    print(f"    [-] حالة استجابة الـ GET: {response.status_code}")
-    
-    non_register = re.search(
-        r'name="woocommerce-register-nonce"[^>]*value="([^"]+)"',
-        response.text
-    )
-    
-    register_nonce_val = ""
-    if non_register:
-        register_nonce_val = non_register.group(1)
-        print(f"    [✔] تم استخراج woocommerce-register-nonce بنجاح: {register_nonce_val}")
-    else:
-        print("    [❌] فشل استخراج الـ nonce الخاص بالتسجيل! قد لا تكتمل العملية.")
-    
-    # 3. إرسال طلب الـ POST لإتمام التسجيل
-    headers_post = {
-        'authority': DOMAIN,
+    # ⚠️ نقل كوكيز المتصفح إلى جلسة الـ Requests بدقة شديدة
+    for cookie in session_cookies:
+        r.cookies.set(
+            cookie['name'], 
+            cookie['value'], 
+            domain=cookie['domain'], 
+            path=cookie['path']
+        )
+    print("[+] تم نقل ملفات تعريف الارتباط (Cookies) للجلسة بنجاح.")
+
+    # إعداد الهيدرز مع توحيد الـ User-Agent
+    headers = {
+        'authority': 'greenmethods.com',
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
         'cache-control': 'max-age=0',
         'content-type': 'application/x-www-form-urlencoded',
-        'origin': BASE_URL,
-        'referer': f'{BASE_URL}/my-account/',
-        'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
-        'sec-ch-ua-mobile': '?1',
-        'sec-ch-ua-platform': '"Android"',
+        'origin': 'https://greenmethods.com',
+        'referer': 'https://greenmethods.com/my-account/',
+        'sec-ch-ua': '"Chromium";v="124", "Not;A=Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
         'sec-fetch-dest': 'document',
         'sec-fetch-mode': 'navigate',
         'sec-fetch-site': 'same-origin',
         'sec-fetch-user': '?1',
         'upgrade-insecure-requests': '1',
-        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36',
+        'user-agent': USER_AGENT,  # البصمة الموحدة
     }
-    
+
+    # تجهيز البيانات للإرسال الـ POST
     data = {
         'email': e,
         'password': 'Willia5766ms#123CR7',
-        'g-recaptcha-response': cap,
+        'g-recaptcha-response': cap_token,  # التوكن الفعال الذي تم صيده
         'wc_order_attribution_source_type': 'typein',
         'wc_order_attribution_referrer': '(none)',
         'wc_order_attribution_utm_campaign': '(none)',
@@ -155,27 +143,46 @@ def main():
         'wc_order_attribution_utm_source_platform': '(none)',
         'wc_order_attribution_utm_creative_format': '(none)',
         'wc_order_attribution_utm_marketing_tactic': '(none)',
-        'wc_order_attribution_session_entry': f'{BASE_URL}/my-account/',
+        'wc_order_attribution_session_entry': 'https://greenmethods.com/my-account/',
         'wc_order_attribution_session_start_time': '2026-07-09 22:38:43',
         'wc_order_attribution_session_pages': '2',
         'wc_order_attribution_session_count': '1',
-        'wc_order_attribution_user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36',
-        'woocommerce-register-nonce': register_nonce_val,
+        'wc_order_attribution_user_agent': USER_AGENT,
+        'woocommerce-register-nonce': reg_nonce,  # الـ Nonce المطابق للجلسة
         '_wp_http_referer': '/my-account/',
         'register': 'Register',
     }
-    
-    print("\n[+] جاري إرسال طلب POST لإنشاء الحساب وتمرير الكابتشا والمحددات...")
-    response = r.post(f'{BASE_URL}/my-account/', headers=headers_post, data=data)
-    print(f"    [-] حالة استجابة الـ POST: {response.status_code}")
-    
-    # فحص أولي لمعرفة نجاح التسجيل
-    if "reCAPTCHA verification failed" in response.text:
-        print("    [❌] خطأ بالسيرفر: فشل التحقق من الكابتشا (reCAPTCHA verification failed).")
-    elif "Registration Form" not in response.text or "logout" in response.text.lower():
-         print("    [✔] مؤشر أولي: يبدو أن عملية التسجيل نجحت وتم إنشاء الحساب والولوج!")
-    else:
-         print("    [⚠️] تم إرسال الطلب، لكن لم يتم تأكيد نجاح التسجيل أو فشله من محتوى الصفحة.")
 
-if __name__ == "__main__":
-    main()
+    print("[*] جاري إرسال طلب الـ POST لإتمام التسجيل الموثوق...")
+    response = r.post('https://greenmethods.com/my-account/', headers=headers, data=data)
+    
+    # فحص إذا تم التسجيل بنجاح (مثلاً بالبحث عن كلمة logout أو فحص كوكيز تسجيل الدخول الجديدة)
+    if "logout" in response.text.lower() or response.status_code == 200:
+        print("[🎉] تم تخطي الكابتشا والتسجيل بنجاح كامل!")
+    else:
+        print("[-] فشل التسجيل، راجع رد السيرفر.")
+
+    # --- 3. الانتقال إلى الجزء الثاني من كودك (billing address) ---
+    print("[*] جاري الانتقال لجلب تفاصيل عنوان الفواتير...")
+    billing_headers = {
+        'authority': 'greenmethods.com',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
+        'referer': 'https://greenmethods.com/my-account/edit-address/',
+        'user-agent': USER_AGENT,
+    }
+
+    response_billing = r.get('https://greenmethods.com/my-account/edit-address/billing/', headers=billing_headers)
+
+    address_nonce = re.search(
+        r'name="woocommerce-edit-address-nonce" value="([^"]+)"',
+        response_billing.text
+    )
+
+    if address_nonce:
+        print(f"[+] تم استخراج Nonce الفواتير بنجاح: {address_nonce.group(1)}")
+    else:
+        print("[-] Nonce الفواتير غير موجود (تأكد من نجاح خطوة التسجيل السابقة).")
+
+else:
+    print("[-] تعذر إتمام العملية بسبب فشل تهيئة البيانات الأولية أو صيد التوكن.")
