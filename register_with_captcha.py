@@ -34,7 +34,6 @@ with Stealth().use_sync(sync_playwright()) as p:
     page = context.new_page()
     
     print("[*] جاري فتح صفحة الحساب الرئيسي...")
-    # ✅ التعديل الحاسم: تم تغيير wait_until إلى domcontentloaded وإضافة timeout ممتد لتفادي الحظر والانتظار اللانهائي
     page.goto(
         "https://greenmethods.com/my-account/", 
         wait_until="domcontentloaded", 
@@ -44,16 +43,20 @@ with Stealth().use_sync(sync_playwright()) as p:
     # 3. ملء بيانات نموذج التسجيل لـ WooCommerce
     print("[*] جاري محاكاة كتابة البيانات داخل النموذج آلياً...")
     
-    page.locator("input#reg_email, input[name='email']").first.fill(email_address)
-    page.wait_for_timeout(600)  # تأخير بشري طفيف للمحاكاة والتخفي
+    email_input = page.locator("input#reg_email, input[name='email']").first
+    email_input.fill(email_address)
+    page.wait_for_timeout(600)
     
-    page.locator("input#reg_password, input[name='password']").first.fill(password_string)
+    password_input = page.locator("input#reg_password, input[name='password']").first
+    password_input.fill(password_string)
     page.wait_for_timeout(1000)
     
-    # 4. النقر على زر التسجيل وتخطي الكابتشا غير المرئية تلقائياً
-    print("[*] جاري الضغط على زر إنشاء الحساب وتخطي الحماية الحية...")
+    # 4. النقر على زر التسجيل بالقوة وتخطي الكابتشا غير المرئية
+    print("[*] جاري الضغط على زر إنشاء الحساب وتخطي الحماية الحية الحاحبة...")
     register_button = page.locator("button[name='register'], input[name='register'], button:has-text('Register')").first
-    register_button.click()
+    
+    # ✅ التعديل الجوهري: استخدام force=True لإجبار المتصفح على نقر الزر وتخطي نافذة Klaviyo المنبثقة
+    register_button.click(force=True)
     
     print("[*] في انتظار استجابة السيرفر وتحديث الجلسة (انتظار 8 ثوانٍ)...")
     page.wait_for_timeout(8000)
