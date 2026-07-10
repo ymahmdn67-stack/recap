@@ -311,17 +311,62 @@ async def main():
                 logger.error(f"Error in POST request: {e}")
                 return False
             
-            # التحقق النهائي من نجاح العملية
+            # التحقق الأولي من نجاح التسجيل
             logger.info("Step 8: Verifying registration success...")
-            non_edit = extract_nonce(response.text, "woocommerce-edit-address-nonce")
-            
+            non_edit_check = extract_nonce(response.text, "woocommerce-edit-address-nonce")
+
+            if not non_edit_check:
+                logger.warning("Registration may have failed - proceeding to billing page check...")
+
+            # --- الطلب الثالث: GET صفحة billing ---
+            logger.info("Step 9: Fetching billing address page...")
+            headers_billing = {
+                'authority': 'greenmethods.com',
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
+                'referer': 'https://greenmethods.com/my-account/edit-address/',
+                'sec-ch-ua': '"Chromium";v="120", "Not;A=Brand";v="99"',
+                'sec-ch-ua-mobile': '?1',
+                'sec-ch-ua-platform': '"Android"',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'same-origin',
+                'sec-fetch-user': '?1',
+                'upgrade-insecure-requests': '1',
+                'user-agent': user_agent,
+            }
+
+            try:
+                response_billing = await session.get(
+                    'https://greenmethods.com/my-account/edit-address/billing/',
+                    headers=headers_billing,
+                    timeout=15
+                )
+
+                if response_billing.status_code != 200:
+                    logger.error(f"Billing GET request failed with status {response_billing.status_code}")
+                    return False
+
+                logger.info(f"Billing GET request successful (Status: {response_billing.status_code})")
+
+            except asyncio.TimeoutError:
+                logger.error("Billing GET request timed out")
+                return False
+            except Exception as e:
+                logger.error(f"Error in Billing GET request: {e}")
+                return False
+
+            # استخراج woocommerce-edit-address-nonce من صفحة billing
+            logger.info("Step 10: Extracting edit address nonce from billing page...")
+            non_edit = extract_nonce(response_billing.text, "woocommerce-edit-address-nonce")
+
             if non_edit:
                 logger.info(f"✓ Success! Registration completed successfully")
                 logger.info(f"Edit Address Nonce: {non_edit}")
                 return True
             else:
-                logger.warning("Registration may have failed - Edit Address Nonce not found")
-                logger.debug(f"Response text: {response.text[:500]}")
+                logger.warning("Failed to get edit address nonce from billing page")
+                logger.debug(f"Response text: {response_billing.text[:500]}")
                 return False
         
     except Exception as e:
