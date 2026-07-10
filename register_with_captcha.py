@@ -160,6 +160,9 @@ data = {
 
 response = r.post('https://greenmethods.com/my-account/', headers=headers, data=data)
 
+print("\n--- استجابة الطلب الثاني بالكامل ---")
+print(response.text)
+print("-----------------------------------\n")
 
 headers = {
     'authority': 'greenmethods.com',
