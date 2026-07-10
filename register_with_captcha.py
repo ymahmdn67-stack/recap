@@ -9,7 +9,7 @@ import sys
 import subprocess
 from faker import Faker
 
-# --- 1. قسم الفحص والتثبيت التلقائي (من الكود الثاني كما هو) ---
+# --- 1. قسم الفحص والتثبيت التلقائي ---
 def ensure_playwright_ready():
     try:
         import playwright
@@ -74,7 +74,7 @@ with sync_playwright() as p:
 cap = TOKEN
 
 
-# --- 3. كود الـ Requests والهيدرز الأصلية دون أي تعديل ---
+# --- 3. كود الـ Requests والهيدرز الأصلية ---
 fake = Faker("en_UK")
 
 f = fake.first_name()
@@ -109,7 +109,7 @@ non_search = re.search(
 
 if non_search:
     print(non_search.group(1))
-    non = non_search.group(1) # استخراج النص لتمريره بشكل صحيح في الداتا
+    non = non_search.group(1)
 else:
     print("Nonce not found")
     non = ""
@@ -158,11 +158,20 @@ data = {
     'register': 'Register',
 }
 
+# إرسال الطلب الثاني (POST)
 response = r.post('https://greenmethods.com/my-account/', headers=headers, data=data)
 
-print("\n--- استجابة الطلب الثاني بالكامل ---")
-print(response.text)
-print("-----------------------------------\n")
+# --- الفحص الجديد المطلوب لحالة الطلب والبحث عن الخطأ المحدد ---
+print(f"\n[+] حالة استجابة الطلب الثاني (Status Code): {response.status_code}")
+
+target_error = "Error:</strong> <strong>ERROR</strong>: reCAPTCHA verification failed.<br /><br />Please try again."
+
+if target_error in response.text:
+    print("❌ النتيجة: فشل التحقق (تم العثور على خطأ reCAPTCHA المحدد)")
+else:
+    print("✅ النتيجة: لم يتم العثور على خطأ reCAPTCHA المحدد في الاستجابة")
+# -----------------------------------------------------------------
+
 
 headers = {
     'authority': 'greenmethods.com',
