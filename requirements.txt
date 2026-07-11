@@ -1,0 +1,11 @@
+# Requirements for greenmethods_complete.py
+# Install with: pip install -r requirements_complete.txt
+
+# Core dependencies
+requests>=2.31.0
+playwright>=1.40.0
+playwright-stealth>=1.0.1
+faker>=20.0.0
+
+# Optional but recommended
+python-dotenv>=1.0.0
