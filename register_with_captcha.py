@@ -7,7 +7,7 @@ import requests
 from urllib3.util import Retry
 from requests.adapters import HTTPAdapter
 from playwright.sync_api import sync_playwright, Response as PlaywrightResponse, Page, BrowserContext
-from playwright_stealth import stealth
+from playwright_stealth import Stealth
 from faker import Faker
 
 def setup_enterprise_logger() -> logging.Logger:
@@ -109,7 +109,7 @@ class BrowserManager:
 
     def build_authenticated_context(self) -> SessionContext:
         session_context = SessionContext()
-        with sync_playwright() as playwright_launcher:
+        with Stealth().use_sync(sync_playwright()) as playwright_launcher:
             logger.info("BrowserManager: Launching Chromium core instance under stealth parameters...")
             browser = playwright_launcher.chromium.launch(
                 headless=self.config.headless_mode,
@@ -125,7 +125,6 @@ class BrowserManager:
                 viewport={'width': 1920, 'height': 1080}
             )
             page = context.new_page()
-            stealth(page)
             page.on("response", self.interceptor.handle_response)
             try:
                 logger.info(f"BrowserManager: Navigation triggered to target: {self.config.target_url}")
