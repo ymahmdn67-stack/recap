@@ -21,7 +21,7 @@ from pathlib import Path
 
 # Third-party imports
 from faker import Faker
-from playwright.sync_api import sync_playwright, Page, BrowserContext
+from playwright.sync_api import sync_playwright, Page, BrowserContext, Playwright
 from playwright_stealth import Stealth
 
 
@@ -256,11 +256,12 @@ class BrowserSessionExtractor:
         self.logger.info("🚀 Launching Playwright browser...")
         
         try:
-            self.playwright = sync_playwright().start()
+            # Use Stealth with context manager (correct pattern)
+            self._stealth_ctx = Stealth().use_sync(sync_playwright())
+            p: Playwright = self._stealth_ctx.__enter__()
+            self.playwright = p
             
-            # Use Stealth plugin
-            stealth = Stealth()
-            self.browser = stealth.use_sync(self.playwright).chromium.launch(
+            self.browser = p.chromium.launch(
                 headless=True,
                 args=[
                     "--no-sandbox",
@@ -416,7 +417,13 @@ class BrowserSessionExtractor:
                 self.context.close()
             if self.browser:
                 self.browser.close()
-            if self.playwright:
+            # Exit stealth context manager (stops playwright internally)
+            if hasattr(self, '_stealth_ctx') and self._stealth_ctx is not None:
+                try:
+                    self._stealth_ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
+            elif self.playwright:
                 self.playwright.stop()
             
             self.logger.debug("Browser resources cleaned up")
