@@ -2,17 +2,17 @@ import re
 import time
 from playwright.sync_api import sync_playwright
 
-# --- معالجة الاستيراد الديناميكي لمكتبة stealth ---
+# --- الاستيراد الصحيح لمكتبة playwright-stealth (الإصدار الجديد) ---
+# المشكلة: stealth هو module وليس دالة قابلة للاستدعاء
+# الحل: استخدام Stealth() كـ class ثم استدعاء apply_stealth_sync(page)
 try:
-    from playwright_stealth import stealth_sync as apply_stealth
+    from playwright_stealth import Stealth
+    def apply_stealth(page):
+        Stealth().apply_stealth_sync(page)
 except ImportError:
-    try:
-        from playwright_stealth import stealth as apply_stealth
-    except ImportError:
-        # في حالة عدم توفر المكتبة، نعرّف دالة وهمية
-        def apply_stealth(page):
-            print("⚠️ تحذير: مكتبة playwright_stealth غير مثبتة. قد يتم كشف الأتمتة.")
-            pass
+    # في حالة عدم توفر المكتبة، نعرّف دالة وهمية
+    def apply_stealth(page):
+        print("⚠️ تحذير: مكتبة playwright_stealth غير مثبتة. قد يتم كشف الأتمتة.")
 
 # استخدام قائمة لتخزين التوكنات المتدفقة بالترتيب
 CAPTCHA_TOKENS = []
