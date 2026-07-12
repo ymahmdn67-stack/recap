@@ -14,36 +14,38 @@ except ImportError:
     def apply_stealth(page):
         print("⚠️ تحذير: مكتبة playwright_stealth غير مثبتة. قد يتم كشف الأتمتة.")
 
-# استخدام قائمة لتخزين التوكنات المتدفقة بالترتيب
+# استخدام قائمة لتخزين التوكنات الفريدة فقط (بدون تكرار)
 CAPTCHA_TOKENS = []
+# عداد الاستجابات الكلية من recaptcha (بما فيها المكررة)
+TOTAL_RESPONSES = 0
 
 def check_network_response(response):
     """
-    فحص استجابات الشبكة والبحث عن توكنات الكابتشا
+    فحص استجابات الشبكة والبحث عن توكنات الكابتشا الفريدة
     """
-    global CAPTCHA_TOKENS
+    global CAPTCHA_TOKENS, TOTAL_RESPONSES
     
     try:
         # الفحص الحصري لطلب إعادة تحميل الكابتشا
         if "recaptcha/api2/reload" in response.url:
+            TOTAL_RESPONSES += 1
             try:
                 # محاولة الحصول على نص الاستجابة بشكل آمن
                 body = response.text()
                 
                 # البحث عن التوكن باستخدام regex مرن
-                # يتعامل مع المسافات والفواصل الديناميكية
                 match = re.search(r'rresp"\s*,\s*"([^"]+)"', body)
                 
                 if match:
                     token = match.group(1)
                     
-                    # التحقق من عدم تكرار التوكن
+                    # إضافة التوكن فقط إذا كان مختلفاً تماماً عن جميع التوكنات السابقة
                     if token not in CAPTCHA_TOKENS:
                         CAPTCHA_TOKENS.append(token)
-                        print(f"✨ [الشبكة] تم رصد توكن جديد. الإجمالي الحالي: {len(CAPTCHA_TOKENS)}")
-                        print(f"   بداية التوكن: {token[:30]}...")
+                        print(f"✨ [الشبكة] توكن فريد #{len(CAPTCHA_TOKENS)} (استجابة #{TOTAL_RESPONSES})")
+                        print(f"   بداية التوكن: {token[:40]}...")
                     else:
-                        print(f"ℹ️ [الشبكة] تم رصد توكن مكرر (تم تجاهله)")
+                        print(f"ℹ️ [الشبكة] استجابة #{TOTAL_RESPONSES}: نفس التوكن السابق (مكرر - تم تجاهله)")
                         
             except Exception as e:
                 print(f"⚠️ خطأ في معالجة استجابة الشبكة: {str(e)}")
@@ -114,9 +116,9 @@ def main():
             print("   (نستهدف التقاط التوكن الثاني والأحدث)")
             print("-" * 60)
             
-            # حلقة الانتظار الذكية
+            # حلقة الانتظار الذكية - تنتظر توكنَين فريدَين مختلفَين
             timeout_counter = 0
-            max_timeout = 30  # 15 ثانية كحد أقصى (30 × 500ms)
+            max_timeout = 60  # 30 ثانية كحد أقصى (60 × 500ms) لإعطاء وقت كافٍ للتوكن الثاني
             
             while len(CAPTCHA_TOKENS) < 2 and timeout_counter < max_timeout:
                 page.wait_for_timeout(500)
@@ -125,7 +127,7 @@ def main():
                 # طباعة تحديث كل 5 ثوان
                 if timeout_counter % 10 == 0:
                     elapsed_seconds = (timeout_counter * 500) / 1000
-                    print(f"   ⏱️ مرت {elapsed_seconds:.1f}s - تم التقاط {len(CAPTCHA_TOKENS)} توكن")
+                    print(f"   ⏱️ مرت {elapsed_seconds:.1f}s - توكنات فريدة: {len(CAPTCHA_TOKENS)} | استجابات كلية: {TOTAL_RESPONSES}")
             
             print("-" * 60)
             print("\n📊 انتهت فترة الفحص الحية. جاري معالجة البيانات المتوفرة:")
@@ -133,16 +135,22 @@ def main():
             
             final_token = None
             
-            # اختيار التوكن المناسب بناءً على ما تم التقاطه
+            print(f"   إجمالي الاستجابات: {TOTAL_RESPONSES} | توكنات فريدة: {len(CAPTCHA_TOKENS)}")
+            
+            # اختيار التوكن المناسب بناءً على التوكنات الفريدة فقط
             if len(CAPTCHA_TOKENS) >= 2:
-                final_token = CAPTCHA_TOKENS[-1]  # آخر توكن (الأحدث)
-                print(f"🎉 نجاح! تم اقتناص {len(CAPTCHA_TOKENS)} توكنات.")
-                print(f"   تم اختيار: التوكن الأحدث (رقم {len(CAPTCHA_TOKENS)})")
+                final_token = CAPTCHA_TOKENS[-1]  # آخر توكن فريد (الأحدث)
+                print(f"🎉 نجاح! تم اقتناص {len(CAPTCHA_TOKENS)} توكنات فريدة ومختلفة.")
+                print(f"   تم اختيار: التوكن الفريد الأحدث (رقم {len(CAPTCHA_TOKENS)})")
                 
             elif len(CAPTCHA_TOKENS) == 1:
                 final_token = CAPTCHA_TOKENS[0]
-                print("⚠️ تم التقاط توكن واحد فقط (التوكن المبدئي)")
-                print("   سيتم اعتماده كخيار احتياطي")
+                if TOTAL_RESPONSES > 1:
+                    print(f"⚠️ الموقع أرسل {TOTAL_RESPONSES} استجابات لكنها جميعها نفس التوكن.")
+                    print("   هذا يعني أن الموقع لا يُصدر توكناً ثانياً مختلفاً في هذه الجلسة.")
+                    print("   سيتم اعتماد التوكن الوحيد المتاح.")
+                else:
+                    print("⚠️ تم التقاط توكن واحد فقط، سيتم اعتماده.")
                 
             else:
                 print("❌ فشل السكربت في التقاط أي توكن من الشبكة")
