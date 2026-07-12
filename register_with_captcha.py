@@ -1,6 +1,7 @@
 import logging
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple
 import requests
@@ -10,6 +11,7 @@ from playwright.sync_api import sync_playwright, Response as PlaywrightResponse,
 from playwright_stealth import Stealth
 from faker import Faker
 
+# --- إعداد نظام تسجيل الأحداث (Logger) الاحترافي ---
 def setup_enterprise_logger() -> logging.Logger:
     logger = logging.getLogger("CoreAutomationEngine")
     if not logger.handlers:
@@ -25,29 +27,25 @@ def setup_enterprise_logger() -> logging.Logger:
 
 logger = setup_enterprise_logger()
 
-class AutomationEngineException(Exception):
-    pass
+# --- الاستثناءات المخصصة للمشروع ---
+class AutomationEngineException(Exception): pass
+class BrowserAutomationError(AutomationEngineException): pass
+class TokenExtractionError(AutomationEngineException): pass
+class NetworkClientError(AutomationEngineException): pass
 
-class BrowserAutomationError(AutomationEngineException):
-    pass
-
-class TokenExtractionError(AutomationEngineException):
-    pass
-
-class NetworkClientError(AutomationEngineException):
-    pass
-
+# --- الإعدادات العامة للنظام (Environment Configuration) ---
 @dataclass(frozen=True)
 class AppConfig:
     target_url: str = "https://greenmethods.com/my-account"
     billing_url: str = "https://greenmethods.com/my-account/edit-address/billing/"
     user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    timeout_ms: int = 45000
+    timeout_ms: int = 30000
     http_timeout_sec: float = 30.0
     max_retries: int = 4
     backoff_factor: float = 2.0
-    headless_mode: bool = True
+    headless_mode: bool = True  # اجعلها False إذا كنت تريد مراقبة المتصفح بصرياً
 
+# --- مخزن بيانات الجلسة الحية (State Transfer Object) ---
 @dataclass
 class SessionContext:
     cookies: Dict[str, str] = field(default_factory=dict)
@@ -57,6 +55,7 @@ class SessionContext:
     register_nonce: Optional[str] = None
     captcha_token: Optional[str] = None
 
+# --- كلاس استخراج الرموز من هيكل الـ HTML ---
 class TokenExtractor:
     @staticmethod
     def extract_register_nonce(html_content: str) -> Optional[str]:
@@ -68,25 +67,36 @@ class TokenExtractor:
         match = re.search(r'name="woocommerce-edit-address-nonce" value="([^"]+)"', html_content)
         return match.group(1) if match else None
 
+# --- [تطوير جوهري] كلاس اعتراض الشبكة الذكي المبني على عدّاد الأحداث ---
 class NetworkInterceptor:
     def __init__(self) -> None:
-        self._captured_captcha_token: Optional[str] = None
+        # مصفوفة ديناميكية لتخزين التوكنات المتدفقة بالترتيب لمنع الاستعجال
+        self._captured_tokens: list[str] = []
 
     def handle_response(self, response: PlaywrightResponse) -> None:
         if "recaptcha/api2/reload" in response.url or "recaptcha/api2/userverify" in response.url:
             try:
                 response_text = response.text()
-                match = re.search(r'rresp","([^"]+)"', response_text) or re.search(r'rresp Trimmed","([^"]+)"', response_text)
+                match = re.search(r'rresp Trimmed","([^"]+)"', response_text) or re.search(r'rresp","([^"]+)"', response_text)
                 if match:
-                    self._captured_captcha_token = match.group(1)
-                    logger.info("NetworkInterceptor: Successfully intercepted and decoded dynamic reCAPTCHA token.")
+                    token = match.group(1)
+                    self._captured_tokens.append(token)
+                    logger.info(f"NetworkInterceptor: Successfully captured Token #{len(self._captured_tokens)}")
             except Exception as e:
-                logger.debug(f"NetworkInterceptor: Non-blocking error reading network body: {e}")
+                logger.debug(f"NetworkInterceptor: Non-blocking error parsing frame: {e}")
 
     @property
     def captured_captcha_token(self) -> Optional[str]:
-        return self._captured_captcha_token
+        # نأخذ دائماً التوكن الأحدث والأخير (التوكن الثاني الحاسم)
+        if self._captured_tokens:
+            return self._captured_tokens[-1]
+        return None
 
+    @property
+    def token_count(self) -> int:
+        return len(self._captured_tokens)
+
+# --- إدارة الكوكيز والتخزين الداخلي للمتصفح ---
 class CookieAndStorageManager:
     @staticmethod
     def extract_cookies(context: BrowserContext) -> Dict[str, str]:
@@ -102,132 +112,163 @@ class CookieAndStorageManager:
             logger.warning(f"CookieAndStorageManager: Failed to extract JS storage layers: {e}")
             return {}, {}
 
+# --- مدير أتمتة المتصفح المتطور (Browser Handoff Core) ---
 class BrowserManager:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.interceptor = NetworkInterceptor()
 
-    def build_authenticated_context(self) -> SessionContext:
+    def build_authenticated_context(self, mock_email: str) -> SessionContext:
         session_context = SessionContext()
+        
         with Stealth().use_sync(sync_playwright()) as playwright_launcher:
-            logger.info("BrowserManager: Launching Chromium core instance under stealth parameters...")
+            logger.info("BrowserManager: Launching Chromium instance under stealth layer...")
             browser = playwright_launcher.chromium.launch(
                 headless=self.config.headless_mode,
-                args=[
-                    '--no-sandbox', 
-                    '--disable-setuid-sandbox', 
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-infobars'
-                ]
+                args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
             )
             context = browser.new_context(
                 user_agent=self.config.user_agent,
                 viewport={'width': 1920, 'height': 1080}
             )
             page = context.new_page()
+            
+            # ربط مستمع الشبكة
             page.on("response", self.interceptor.handle_response)
+            
             try:
-                logger.info(f"BrowserManager: Navigation triggered to target: {self.config.target_url}")
-                page.goto(self.config.target_url, wait_until="networkidle", timeout=self.config.timeout_ms)
-                page.wait_for_timeout(6000)
-                page.mouse.move(150, 150)
-                page.wait_for_timeout(500)
-                page.mouse.move(400, 350)
-                page.wait_for_timeout(1000)
+                logger.info(f"BrowserManager: Navigating to target via DomContentLoaded strategy.")
+                page.goto(self.config.target_url, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
+                
+                # --- [تحديث] محاكاة السلوك البشري المرن لتوليد بيانات التلغيم (Telemetry) ---
+                try:
+                    target_selector = '#reg_email' if page.query_selector('#reg_email') else 'input[type="email"]'
+                    if page.query_selector(target_selector):
+                        page.wait_for_selector(target_selector, timeout=3000)
+                        page.focus(target_selector)
+                        page.type(target_selector, mock_email, delay=120)  # كتابة ببطء بشري محايد
+                        logger.info("BrowserManager: Generated typing telemetry on input field.")
+                    else:
+                        logger.info("BrowserManager: Form fields not immediately found. Executing movement fallbacks...")
+                        page.mouse.move(500, 300)
+                        page.mouse.click(500, 300)
+                        page.evaluate("window.scrollTo(0, 300);")
+                        page.wait_for_timeout(500)
+                        page.evaluate("window.scrollTo(0, 0);")
+                except Exception as telemetry_err:
+                    logger.warning(f"BrowserManager: Handled non-blocking telemetry delay notice: {telemetry_err}")
+
+                # --- [تحديث جوهري] بوابة العبور المشروطة لمنع استعجال الكود ---
+                logger.info("BrowserManager: Holding execution gate. Waiting specifically for Token #2 from network stream...")
+                start_gate_time = time.time()
+                while self.interceptor.token_count < 2:
+                    page.wait_for_timeout(200)  # فحص دوري كل 200 ملي ثانية
+                    # حد أقصى للأمان لمنع التعليق اللانهائي في حال بطء الشبكة
+                    if time.time() - start_gate_time > 8:
+                        logger.warning("BrowserManager: Safety gate timeout reached. Moving forward with latest state.")
+                        break
+
+                # قراءة الهيكل النهائي لاستخراج الـ Nonce
                 html_dom = page.content()
                 session_context.register_nonce = TokenExtractor.extract_register_nonce(html_dom)
-                if session_context.register_nonce:
-                    logger.info(f"BrowserManager: Core registration nonce found: {session_context.register_nonce}")
-                else:
-                    logger.warning("BrowserManager: Registration nonce was not detected in initial DOM sweep.")
+                
+                # [مزامنة حرجة]: سحب الكوكيز الآن بعد أن قام الطلب الثاني بتحديث كوكيز الحماية الديناميكية
                 session_context.cookies = CookieAndStorageManager.extract_cookies(context)
                 session_context.local_storage, session_context.session_storage = CookieAndStorageManager.extract_web_storage(page)
+                
+                # إعداد الهيدرز المقترنة بالمتصفح
                 session_context.headers = {
                     'User-Agent': self.config.user_agent,
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Origin': self.config.target_url.split('/my-account')[0],
                     'Referer': self.config.target_url + '/',
                     'Connection': 'keep-alive'
                 }
                 session_context.captcha_token = self.interceptor.captured_captcha_token
+                
             except Exception as exception:
-                logger.error(f"BrowserManager: Critical structural error during automation: {exception}")
-                raise BrowserAutomationError("Failed to successfully orchestrate cold browser context initialization.") from exception
+                logger.error(f"BrowserManager: Operational crash during page processing: {exception}")
+                raise BrowserAutomationError("Failed to orchestrate context handoff layers.") from exception
             finally:
-                logger.info("BrowserManager: Closing browser architecture and releasing system resources to memory.")
+                logger.info("BrowserManager: Releasing browser resources cleanly.")
                 context.close()
                 browser.close()
+                
         return session_context
 
+# --- عميل إرسال الطلبات السريعة عبر طبقة الـ HTTP الخلفية الصامتة ---
 class RequestClient:
     def __init__(self, config: AppConfig, session_context: SessionContext) -> None:
         self.config = config
         self.context = session_context
         self.session = requests.Session()
-        self._hydrate_and_configure_session()
+        self._hydrate_session()
 
-    def _hydrate_and_configure_session(self) -> None:
+    def _hydrate_session(self) -> None:
         self.session.cookies.update(self.context.cookies)
         self.session.headers.update(self.context.headers)
+        
         retry_strategy = Retry(
             total=self.config.max_retries,
             backoff_factor=self.config.backoff_factor,
             status_forcelist=[429, 500, 502, 503, 504],
             raise_on_status=False
         )
-        http_adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=15, pool_maxsize=15)
-        self.session.mount("http://", http_adapter)
-        self.session.mount("https://", http_adapter)
-        logger.info("RequestClient: Network session fully hydrated with cookies, headers, and pooling configurations.")
+        adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        logger.info("RequestClient: Internal HTTP Session fully hydrated with synchronized tokens and cookies.")
 
     def execute_post(self, url: str, payload: Dict[str, Any]) -> requests.Response:
-        try:
-            response = self.session.post(url, data=payload, timeout=self.config.http_timeout_sec)
-            return response
-        except requests.RequestException as e:
-            logger.error(f"RequestClient: Core POST operation failed on endpoint: {url}. Details: {e}")
-            raise NetworkClientError(f"HTTP POST operation fundamentally collapsed: {e}") from e
+        return self.session.post(url, data=payload, timeout=self.config.http_timeout_sec)
 
     def execute_get(self, url: str) -> requests.Response:
-        try:
-            response = self.session.get(url, timeout=self.config.http_timeout_sec)
-            return response
-        except requests.RequestException as e:
-            logger.error(f"RequestClient: Core GET operation failed on endpoint: {url}. Details: {e}")
-            raise NetworkClientError(f"HTTP GET operation fundamentally collapsed: {e}") from e
+        return self.session.get(url, timeout=self.config.http_timeout_sec)
 
+# --- منشئ الهويات العشوائية المطابقة للمواصفات الحقيقية ---
 class IdentityGenerator:
     def __init__(self) -> None:
-        self.faker = Faker("en_UK")
+        self.faker = Faker("en_US")
 
     def create_mock_profile(self) -> Dict[str, str]:
         first_name = self.faker.first_name()
         last_name = self.faker.last_name()
-        unique_email = f"{first_name.lower()}.{last_name.lower()}{self.faker.random_int(min=1000, max=9999)}@gmail.com"
+        unique_email = f"{first_name.lower()}.{last_name.lower()}{self.faker.random_int(min=10, max=999)}@gmail.com"
         return {
             "email": unique_email,
-            "password": "ComplexSecurePassword!2026#$"
+            "password": f"StrongSecurePass!{self.faker.random_int(min=100, max=999)}"
         }
 
+# --- المايسترو والمنظم العام لسير العمل (Pipeline Orchestrator) ---
 class RegistrationWorkflowOrchestrator:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.identity_provider = IdentityGenerator()
 
     def run_pipeline(self) -> Optional[str]:
-        logger.info("=== STARTING ARCHITECTURAL STATE HANDOFF WORKFLOW ===")
+        logger.info("=== STARTING WORKFLOW PIPELINE WITH DATA LIFE-CYCLE HANDOFF ===")
+        
+        # توليد بيانات مستخدم جديدة مسبقاً لاستخدامها في محاكاة حركة الكيبورد
+        account_profile = self.identity_provider.create_mock_profile()
+        
+        # الخطوة 1: تشغيل أتمتة المتصفح الموجهة بالأحداث لاقتناص التوكن الثاني والكوكيز المتسلسلة
         browser_manager = BrowserManager(self.config)
-        session_context = browser_manager.build_authenticated_context()
+        session_context = browser_manager.build_authenticated_context(mock_email=account_profile['email'])
+        
+        # فحص جودة وصحة البيانات الملتقطة قبل الانتقال للشبكة الخلفية
         if not session_context.captcha_token:
-            logger.error("Orchestrator: Aborting execution. Critical 'g-recaptcha-response' token was not intercepted.")
+            logger.error("Orchestrator: Pipeline aborted. Token #2 was not caught by interceptor.")
             return None
         if not session_context.register_nonce:
-            logger.error("Orchestrator: Aborting execution. Critical Woocommerce Registration Nonce is missing.")
+            logger.error("Orchestrator: Pipeline aborted. Baseline registration nonce was missing from DOM.")
             return None
-        logger.info("Orchestrator: Session context verification passed. Transitioning execution completely to HTTP Layer.")
+            
+        logger.info("Orchestrator: Handoff validation passed. Initiating silent back-end HTTP session.")
+        
+        # الخطوة 2: إنشاء الحساب صامتاً عبر طبقة الـ HTTP فورا وبأعلى درجة وثوقية
         client = RequestClient(self.config, session_context)
-        account_profile = self.identity_provider.create_mock_profile()
+        
         post_payload = {
             'email': account_profile['email'],
             'password': account_profile['password'],
@@ -236,37 +277,38 @@ class RegistrationWorkflowOrchestrator:
             'g-recaptcha-response': session_context.captcha_token,
             'register': 'Register'
         }
-        logger.info(f"Orchestrator: Submitting silent registration for entity: {account_profile['email']}")
+        
+        logger.info(f"Orchestrator: Dispatching silent transaction for: {account_profile['email']}")
         http_response = client.execute_post(self.config.target_url, payload=post_payload)
         response_html = http_response.text
+        
+        # الخطوة 3: التحقق من نجاح العملية واقتناص رمز الـ Billing Nonce
         if "logout" in response_html.lower() or "customer-logout" in response_html.lower():
-            logger.info("Orchestrator: Registration completed successfully via HTTP Session Handoff!")
+            logger.info("Orchestrator: Success! Session successfully established at HTTP layer.")
+            
             billing_nonce = TokenExtractor.extract_billing_nonce(response_html)
             if billing_nonce:
-                logger.info("Orchestrator: Billing nonce extracted directly from initial authentication payload.")
                 return billing_nonce
-            logger.info("Orchestrator: Navigating to billing sub-domain endpoint to fetch secondary nonces...")
-            billing_page_response = client.execute_get(self.config.billing_url)
-            billing_nonce = TokenExtractor.extract_billing_nonce(billing_page_response.text)
-            if billing_nonce:
-                return billing_nonce
-            else:
-                logger.warning("Orchestrator: Registration succeeded, but the billing nonce structure has changed in the DOM.")
-                return None
+                
+            logger.info("Orchestrator: Fetching secondary billing endpoint to extract nonce value...")
+            billing_page = client.execute_get(self.config.billing_url)
+            return TokenExtractor.extract_billing_nonce(billing_page.text)
         else:
-            if "recaptcha verification failed" in response_html.lower():
-                logger.error("Orchestrator: Registration rejected by target security layer due to poor reCAPTCHA score (IP reputation low).")
+            if "verification failed" in response_html.lower():
+                logger.error("Orchestrator: Rejected. Google flagged the session scoring as bot traffic.")
             else:
-                logger.error("Orchestrator: Registration request failed to authenticate. Check structure variables or proxy constraints.")
+                logger.error("Orchestrator: Handshake failed. The form fields or structure might be out of sync.")
             return None
 
+# --- نقطة الانطلاق الرئيسية للمشروع ---
 if __name__ == "__main__":
     system_config = AppConfig(headless_mode=True)
-    pipeline_orchestrator = RegistrationWorkflowOrchestrator(system_config)
-    final_billing_token = pipeline_orchestrator.run_pipeline()
-    print("\n" + "="*50)
-    if final_billing_token:
-        print(f"ULTIMATE PRODUCTION RESULT (Billing Nonce): {final_billing_token}")
+    orchestrator = RegistrationWorkflowOrchestrator(system_config)
+    final_token = orchestrator.run_pipeline()
+    
+    print("\n" + "="*60)
+    if final_token:
+        print(f"🏆 SUCCESSFUL PIPELINE CONCLUSION (Billing Nonce): {final_token}")
     else:
-        print("System automation workflow concluded without capturing the final Billing Nonce.")
-    print("="*50 + "\n")
+        print("❌ PIPELINE CONCLUDED: Unable to retrieve valid target session.")
+    print("="*60 + "\n")
