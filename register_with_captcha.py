@@ -1,91 +1,177 @@
 import re
+import time
+import random
+import json
+import base64
+import requests
 from playwright.sync_api import sync_playwright
+from faker import Faker
 
-# استخدام مصفوفة (List) واضحة لتخزين كل التوكنات المتدفقة بالترتيب
+# محاولة استيراد مكتبة التخفي
+try:
+    from playwright_stealth import Stealth
+    def apply_stealth(page):
+        Stealth().apply_stealth_sync(page)
+except ImportError:
+    def apply_stealth(page):
+        pass
+
+# قائمة لتخزين التوكنات الفريدة
 CAPTCHA_TOKENS = []
 
 def check_network_response(response):
     global CAPTCHA_TOKENS
-    
-    # الفحص الحصري لطلب إعادة تحميل الكابتشا
-    if "recaptcha/api2/reload" in response.url:
-        try:
-            body = response.text()
-            # الـ Regex المرن لالتقاط التوكن بغض النظر عن وجود مسافات أو فواصل ديناميكية
-            match = re.search(r'rresp"\s*,\s*"([^"]+)"', body)
-            if match:
-                token = match.group(1)
-                CAPTCHA_TOKENS.append(token)
-                print(f"✨ [الشبكة] تم رصد توكن وإضافته للمصفوفة. الإجمالي الحالي: {len(CAPTCHA_TOKENS)}")
-        except Exception:
-            pass
+    try:
+        if "recaptcha/api2/reload" in response.url:
+            try:
+                body = response.text()
+                match = re.search(r'rresp"\s*,\s*"([^"]+)"', body)
+                if match:
+                    token = match.group(1)
+                    if token not in CAPTCHA_TOKENS:
+                        CAPTCHA_TOKENS.append(token)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
-def main():
+def get_captcha_token():
+    """المرحلة الأولى: تشغيل Playwright واقتناص التوكن"""
     global CAPTCHA_TOKENS
-    with sync_playwright() as p:
-        # تشغيل المتصفح بوضع مرئي لإتمام التفاعل البشري بنجاح
-        browser = p.chromium.launch(
-            headless=False, 
-            args=['--disable-blink-features=AutomationControlled']
-        )
-        
-        context = browser.new_context(
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        )
-        
-        page = context.new_page()
-        
-        # ربط مستمع الشبكة بالاستجابات قبل الانتقال للموقع
-        page.on("response", check_network_response)
-        
-        print("🚀 جاري فتح الصفحة...")
-        # تم إرجاعها إلى "commit" كما في كودك الأصلي لمنع تعليق المتصفح أو حدوث الـ Timeout
-        page.goto("https://greenmethods.com/my-account/", wait_until="commit")
-        
-        # محاكاة حركة ماوس وتفاعل حقيقي داخل الصفحة لتحفيز جوجل على إطلاق التوكن الثاني
-        page.mouse.move(100, 100)
-        page.wait_for_timeout(600)
-        page.mouse.move(250, 300)
-        
-        try:
-            # الكتابة ببطء داخل حقل البريد لرفع تقييم الحساب البشري وتوليد التوكن الثاني
-            if page.is_visible("input[type='email']"):
-                page.type("input[type='email']", "dawn.real.a688rcher99@gmail.com", delay=120)
-        except Exception:
-            pass
-
-        print("⏳ في انتظار تدفق التوكنات (نستهدف التقاط التوكن الثاني والأحدث)...")
-        
-        timeout_counter = 0
-        # حلقة الانتظار الذكية: الكود لن يتحرك حتى يلتقط توكنين صراحة (أو تمر 15 ثانية كحد أقصى للأمان)
-        while len(CAPTCHA_TOKENS) < 2 and timeout_counter < 30:
-            page.wait_for_timeout(500)  # فحص حالة المصفوفة كل نصف ثانية
-            timeout_counter += 1
+    cap = None  
+    
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=False, 
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage'
+                ]
+            )
             
-        print("\n📊 انتهت فترة الفحص الحية. جاري معالجة البيانات المتوفرة:")
-        print("-" * 50)
-        
-        final_token = None
-        
-        # اختيار التوكن بناءً على ما تم التقاطه في المصفوفة لمنع خطأ الاستعجال
-        if len(CAPTCHA_TOKENS) >= 2:
-            final_token = CAPTCHA_TOKENS[1]  # اعتماد التوكن الثاني والأحدث مباشرة
-            print("🎉 نجاح باهر! تم اقتناص التوكن الثاني (High Score Token).")
-        elif len(CAPTCHA_TOKENS) == 1:
-            final_token = CAPTCHA_TOKENS[0]  # تراجع احتياطي للتوكن الأول في حال عدم صدور الثاني
-            print("⚠️ تم التقاط توكن واحد فقط (التوكن المبدئي)، سيتم اعتماده كخيار احتياطي.")
-        else:
-            print("❌ فشل السكربت في التقاط أي توكن من الشبكة.")
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080}
+            )
+            
+            page = context.new_page()
+            apply_stealth(page)
+            
+            # ربط مستمع الشبكة
+            page.on("response", check_network_response)
+            
+            try:
+                page.goto("https://greenmethods.com/my-account/", wait_until="commit", timeout=30000)
+            except Exception:
+                pass
+            
+            # محاكاة تفاعل طبيعي
+            page.mouse.move(100, 100)
+            page.wait_for_timeout(600)
+            page.mouse.move(250, 300)
+            page.wait_for_timeout(400)
+            
+            # محاولة الكتابة لتنشيط الحقول
+            try:
+                email_input = "input[type='email']"
+                if page.is_visible(email_input):
+                    page.type(email_input, "test.user@greenmethods.com", delay=120)
+            except Exception:
+                pass
+            
+            # حلقة الانتظار لالتقاط التوكنات
+            timeout_counter = 0
+            max_timeout = 60  
+            
+            while len(CAPTCHA_TOKENS) < 2 and timeout_counter < max_timeout:
+                page.wait_for_timeout(500)
+                timeout_counter += 1
+            
+            # تحديد قيمة المتغير cap بناءً على التوكنات الملتَقطة
+            if len(CAPTCHA_TOKENS) >= 2:
+                cap = CAPTCHA_TOKENS[1]
+                print(f"✅ تم بنجاح اقتناص التوكن الثاني (cap): {cap[:50]}...")
+            elif len(CAPTCHA_TOKENS) == 1:
+                cap = CAPTCHA_TOKENS[0]
+                print(f"⚠️ تم العثور على توكن واحد فقط: {cap[:50]}...")
+            else:
+                print("❌ لم يتم التقاط أي توكن.")
+            
+            browser.close()
+            return cap  # إرجاع التوكن لاستخدامه لاحقاً
+            
+    except Exception as e:
+        print(f"❌ خطأ حرج في مرحلة المتصفح: {str(e)}")
+        return None
 
-        # حفظ التوكن المستهدف في الملف النصي لطبقة الـ POST
-        if final_token:
-            with open("valid_token.txt", "w") as f:
-                f.write(final_token)
-            print(f"💾 تم حفظ التوكن المعتمد بنجاح في ملف: valid_token.txt")
-            print(f"بداية التوكن: {final_token[:40]}...")
-        
-        print("-" * 50)
-        browser.close()
+def execute_requests_session(cap_token):
+    """المرحلة الثانية: معالجة الطلبات وإرسال التوكن المستخرج"""
+    if not cap_token:
+        print("❌ إلغاء العملية: لم يتم توفير توكن CAPTCHA valid.")
+        return
+
+    r = requests.Session()
+    fake = Faker("en_UK")
+
+    f = fake.first_name()
+    l = fake.last_name()
+    e = f"{f.lower()}.{l.lower()}@greenmethods.com"
+
+    headers = {
+        'authority': 'greenmethods.com',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'accept-language': 'en-US,en;q=0.9',
+        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36',
+    }
+
+    try:
+        # 1. طلب الصفحة لاستخراج الـ Nonce الأول
+        response = r.get('https://greenmethods.com/my-account/', headers=headers)
+        non = re.search(r'name="woocommerce-register-nonce"[^>]*value="([^"]+)"', response.text)
+
+        if non:
+            nonce_value = non.group(1)
+            print(f"🟢 Nonce المستخرج: {nonce_value}")
+        else:
+            print("❌ Nonce not found")
+            return
+
+        # 2. إرسال طلب التسجيل بالتوكن والـ Nonce
+        post_headers = headers.copy()
+        post_headers.update({
+            'content-type': 'application/x-www-form-urlencoded',
+            'origin': 'https://greenmethods.com',
+            'referer': 'https://greenmethods.com/my-account/'
+        })
+
+        data = {
+            'email': e,
+            'password': 'Password123#Example',
+            'g-recaptcha-response': cap_token,  # استخدام التوكن الممرر هنا
+            'woocommerce-register-nonce': nonce_value,
+            '_wp_http_referer': '/my-account/',
+            'register': 'Register',
+        }
+
+        r.post('https://greenmethods.com/my-account/', headers=post_headers, data=data)
+
+        # 3. طلب صفحة تعديل العنوان لاستخراج الـ Nonce الثاني
+        response = r.get('https://greenmethods.com/my-account/edit-address/billing/', headers=headers)
+        non_address = re.search(r'name="woocommerce-edit-address-nonce" value="([^"]+)"', response.text)
+
+        if non_address:
+            print(f"🟢 Address Nonce المستخرج: {non_address.group(1)}")
+        else:
+            print("❌ Address Nonce not found")
+
+    except Exception as e:
+        print(f"❌ خطأ أثناء تنفيذ طلبات الـ HTTP: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    # خطوة 1: استخراج التوكن عبر المتصفح
+    captured_token = get_captcha_token()
+    
+    # خطوة 2: تمرير التوكن مباشرة للجلسة والمتابعة
+    execute_requests_session(captured_token)
