@@ -118,7 +118,7 @@ class OptimizedHybridWooCommerceEngine:
                 # التركيز والكتابة في حقل البريد الإلكتروني مع إجبار الفوكس (force=True) لتفادي أي طبقة زجاجية متبقية
                 logger.info("📝 التركيز وملء حقل البريد الإلكتروني برمجياً لتوليد التوكن الثاني...")
                 email_locator = page.locator("input#reg_email")
-                email_locator.focus(force=True)
+                email_locator.focus()
                 email_locator.fill(payload.email, force=True)
                 
                 # إرسال إشارة كتابة خفيفة لتحفيز جافاسكريبت الكابتشا على إعادة التوليد
