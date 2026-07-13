@@ -2,7 +2,6 @@ import re
 import random
 import logging
 from dataclasses import dataclass
-import requests
 from playwright.sync_api import sync_playwright, BrowserContext, Page
 from faker import Faker
 
@@ -15,7 +14,7 @@ except ImportError:
         pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("FullBrowserEngine")
+logger = logging.getLogger("FullBrowserEngine_v2")
 
 @dataclass(frozen=True)
 class RegistrationPayload:
@@ -23,11 +22,6 @@ class RegistrationPayload:
     password: str
 
 class FullBrowserWooCommerceEngine:
-    """
-    محرك المحاكاة الكاملة (Full Browser Automation):
-    يقوم بكافة العمليات (تجاوز البوب اب، الكتابة، التسجيل، الانتقال، واستخراج النونس)
-    داخل المتصفح مباشرة لضمان أعلى مستويات الأمان وتفادي قيود الـ HTTP.
-    """
     
     def __init__(self) -> None:
         self.fake = Faker("en_UK")
@@ -37,17 +31,18 @@ class FullBrowserWooCommerceEngine:
     def _generate_payload(self) -> RegistrationPayload:
         f_name = self.fake.first_name()
         l_name = self.fake.last_name()
-        email = f"{f_name.lower()}.{l_name.lower()}@greenmethods.com"
-        password = f"SecurP@ss{random.randint(1000, 9999)}#2026"
+        email = f"{f_name.lower()}.{l_name.lower()}{random.randint(10,99)}@greenmethods.com"
+        # تم تعقيد كلمة المرور لضمان قبول ووردبريس لها ككلمة مرور قوية جداً
+        password = f"Xyz7#@pWd_{random.randint(1000, 9999)}!2026"
         return RegistrationPayload(email=email, password=password)
 
     def execute(self) -> bool:
         payload = self._generate_payload()
         
-        logger.info("⚡ بدء محرك المحاكاة الكاملة عبر Playwright...")
+        logger.info("⚡ بدء محرك المحاكاة الكاملة (v2) مع نظام التشخيص الرسومي...")
         with sync_playwright() as p:
             browser = p.chromium.launch(
-                headless=False, # اجعله True إذا كنت تشغله على سيرفر بدون واجهة مع Xvfb
+                headless=False,
                 args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"]
             )
             context = browser.new_context(user_agent=self.user_agent, viewport={"width": 1920, "height": 1080})
@@ -66,34 +61,31 @@ class FullBrowserWooCommerceEngine:
                         document.querySelectorAll(sel).forEach(el => el.remove());
                     });
                 }""")
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(1000)
 
-                # 3. ملء البيانات بمحاكاة سلوكية (تأخير خفيف بين الحروف)
+                # 3. ملء البيانات بمحاكاة سلوكية تفاعلية
                 logger.info(f"📝 كتابة البريد الإلكتروني: {payload.email}")
-                email_locator = page.locator("input#reg_email")
-                email_locator.focus()
-                page.type("input#reg_email", payload.email, delay=random.randint(50, 100))
+                page.locator("input#reg_email").fill(payload.email, force=True)
+                page.wait_for_timeout(500)
                 
-                logger.info("📝 كتابة كلمة المرور...")
-                password_locator = page.locator("input#reg_password")
-                password_locator.focus()
-                page.type("input#reg_password", payload.password, delay=random.randint(50, 100))
-                
-                page.wait_for_timeout(1000) # انتظار قليل للتأكد من استقرار الكابتشا الخلفية
+                logger.info("📝 كتابة كلمة المرور الصارمة...")
+                page.locator("input#reg_password").fill(payload.password, force=True)
+                page.wait_for_timeout(1500) # انتظار إضافي لتوليد كابتشا السلوك
 
                 # 4. الضغط على زر التسجيل داخل المتصفح مباشرة
                 logger.info("🔘 الضغط على زر التسجيل (Register) داخل المتصفح...")
                 register_button = page.locator("button[name='register']")
                 
-                # النقر مع تفعيل المتابعة حتى استقرار الشبكة بعد إعادة التوجيه
-                with page.expect_navigation(wait_until="networkidle", timeout=45000):
-                    register_button.click(force=True)
+                # إرسال النقرة مع انتظار انتهاء معالجة الشبكة وإعادة التوجيه
+                register_button.click(force=True)
+                page.wait_for_load_state("networkidle", timeout=30000)
+                page.wait_for_timeout(3000) # مهلة أمان لاستقرار ملفات تعريف الارتباط
 
-                # 5. الانتقال المباشر لصفحة العناوين داخل نفس المتصفح والموقع مسجل دخول
+                # 5. الانتقال المباشر لصفحة العناوين
                 logger.info("📬 الانتقال إلى صفحة تحرير العناوين لاستخراج الـ Nonce...")
                 page.goto("https://greenmethods.com/my-account/edit-address/billing/", wait_until="networkidle", timeout=30000)
                 
-                # 6. استخراج الـ Address Nonce من محتوى المتصفح الحركي (DOM)
+                # 6. استخراج الـ Address Nonce
                 html_content = page.content()
                 match = re.search(r'name="woocommerce-edit-address-nonce"\s*value="([^"]+)"', html_content)
                 
@@ -103,10 +95,17 @@ class FullBrowserWooCommerceEngine:
                     browser.close()
                     return True
                 else:
-                    logger.error("❌ لم يتم العثور على Address Nonce. قد يكون الحساب لم يسجل بنجاح أو الكابتشا منعت الزر.")
+                    logger.error("❌ لم يتم العثور على Address Nonce. سيتم التقاط صورة للواجهة الآن لمعرفة السبب...")
+                    # التقاط صورة وحفظها في مجلد المشروع الحالي لرؤية الخطأ
+                    page.screenshot(path="error.png")
+                    logger.info("📸 تم حفظ لقطة شاشة للخطأ باسم 'error.png' في المجلد الحالي. يرجى مراجعتها.")
                     
             except Exception as e:
-                logger.error(f"❌ خطأ أثناء المحاكاة الكاملة: {e}")
+                logger.error(f"❌ خطأ غير متوقع أثناء المحاكاة الكاملة: {e}")
+                try:
+                    page.screenshot(path="critical_error.png")
+                except:
+                    pass
             
             browser.close()
         return False
