@@ -17,7 +17,7 @@ except ImportError:
         pass
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("MultiTokenHybridEngine")
+logger = logging.getLogger("AntiPopupHybridEngine")
 
 @dataclass(frozen=True)
 class RegistrationPayload:
@@ -27,9 +27,10 @@ class RegistrationPayload:
 
 class OptimizedHybridWooCommerceEngine:
     """
-    المحرك الهجين المتقدم:
-    - يراقب الشبكة لاقتناص توكنات reCAPTCHA المتعددة ويعزل التوكن الثاني (Action Token).
-    - ينقل الجلسة والكوكيز والتوكن الثاني إلى Requests لإتمام التسجيل وجلب البيانات بسرعة فائقة.
+    المحرك الهجين المتقدم والمقاوم للنوافذ المنبثقة:
+    - يقوم بتدمير أي Popup أو Modal يحجب حقول الإدخال عبر جافاسكريبت فوراً.
+    - يراقب الشبكة بدقة لعزل واقتناص التوكن الثاني (Action Token).
+    - ينقل الكوكيز والبيانات وينفذ التسجيل الصافي بسرعة فائقة عبر Requests.
     """
     
     def __init__(self) -> None:
@@ -48,7 +49,7 @@ class OptimizedHybridWooCommerceEngine:
         return RegistrationPayload(email=email, password=password)
 
     def _check_network_response(self, response) -> None:
-        """مستمع الشبكة: عزل التوكنات الفريدة من استجابات reload الخاصة بجوجل."""
+        """مستمع الشبكة: عزل التوكنات الفريدة من استجابات جوجل الخلفية."""
         try:
             if "recaptcha/api2/reload" in response.url:
                 body = response.text()
@@ -76,8 +77,8 @@ class OptimizedHybridWooCommerceEngine:
         payload = self._generate_payload()
         target_captcha_token: Optional[str] = None
         
-        # --- المرحلة الأولى: تشغيل Playwright لاقتناص التوكن الثاني وتجهيز الجلسة ---
-        logger.info("⚡ [المرحلة 1] بدء أتمتة المتصفح لبناء الجلسة واقتناص التوكن الثاني...")
+        # --- المرحلة الأولى: تشغيل Playwright وتخطي الحواجب واقتناص التوكن الثاني ---
+        logger.info("⚡ [المرحلة 1] بدء أتمتة المتصفح (تجاوز الـ Popups واقتناص التوكن الثاني)...")
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=False,
@@ -90,9 +91,19 @@ class OptimizedHybridWooCommerceEngine:
             page.on("response", self._check_network_response)
 
             try:
-                # الانتقال للموقع لبدء توليد التوكن الأول
+                # الانتقال للموقع لبدء العمليات
                 page.goto("https://greenmethods.com/my-account/", wait_until="networkidle", timeout=45000)
                 
+                # خطوة تصحيحية: تدمير النافذة المنبثقة (Popup Modal) فوراً لمنع حجب الأحداث الإششارية
+                logger.info("🧹 تنظيف الواجهة برمجياً وإزالة أي نوافذ منبثقة تحجب الرؤية...")
+                page.evaluate("""() => {
+                    const selectors = ['[role="dialog"]', '.kl-private-reset-css-Xuajs1', '.modal', '.popup'];
+                    selectors.forEach(sel => {
+                        document.querySelectorAll(sel).forEach(el => el.remove());
+                    });
+                }""")
+                page.wait_for_timeout(600)
+
                 # استخراج الـ Register Nonce الأصلي المتزامن مع هذه الجلسة
                 html = page.content()
                 nonce_match = re.search(r'name="woocommerce-register-nonce"\s*value="([^"]+)"', html)
@@ -100,46 +111,50 @@ class OptimizedHybridWooCommerceEngine:
                     self.register_nonce = nonce_match.group(1)
                     logger.info(f"🟢 الـ Register Nonce المستخرج: {self.register_nonce}")
 
-                # محاكاة سلوك تفاعلي طبيعي
-                page.mouse.move(100, 100)
+                # محاكاة سلوك تفاعلي طبيعي بالفأرة
+                page.mouse.move(150, 150)
                 page.wait_for_timeout(400)
                 
-                # الكتابة داخل الحقل بقيمة وهمية لتحفيز توليد التوكن الثاني (Action Token)
-                logger.info("📝 الكتابة في حقل البريد الإلكتروني لتحفيز التوكن الثاني...")
-                page.click("input#reg_email")
-                page.type("input#reg_email", payload.email, delay=random.randint(60, 120))
+                # التركيز والكتابة في حقل البريد الإلكتروني مع إجبار الفوكس (force=True) لتفادي أي طبقة زجاجية متبقية
+                logger.info("📝 التركيز وملء حقل البريد الإلكتروني برمجياً لتوليد التوكن الثاني...")
+                email_locator = page.locator("input#reg_email")
+                email_locator.focus(force=True)
+                email_locator.fill(payload.email, force=True)
                 
-                # حلقة انتظار ذكية حتى يتم التقاط توكنين بالتمام أو انتهاء المهلة (30 ثانية)
+                # إرسال إشارة كتابة خفيفة لتحفيز جافاسكريبت الكابتشا على إعادة التوليد
+                page.type("input#reg_email", " ", delay=50) 
+                
+                # حلقة انتظار ذكية حتى يتم التقاط التوكن الثاني المطلوب أو انتهاء المهلة (30 ثانية)
                 timeout_counter = 0
                 while len(self.captcha_tokens) < 2 and timeout_counter < 60:
                     page.wait_for_timeout(500)
                     timeout_counter += 1
 
-                # استراتيجية اختيار التوكن الصحيح
+                # استراتيجية التحقق وعزل التوكن الثاني
                 if len(self.captcha_tokens) >= 2:
-                    target_captcha_token = self.captcha_tokens[1] # عزل التوكن الثاني المطلـوب
-                    logger.info(f"🏆 [نجاح الاقتناص] تم اعتماد التوكن الثاني بنجاح: {target_captcha_token[:40]}...")
+                    target_captcha_token = self.captcha_tokens[1] # عزل التوكن الثاني بالتمام والكمال
+                    logger.info(f"🏆 [نجاح الاقتناص] تم عزل واعتماد التوكن الثاني: {target_captcha_token[:40]}...")
                 elif len(self.captcha_tokens) == 1:
                     target_captcha_token = self.captcha_tokens[0]
-                    logger.warning(f"⚠️ تم العثور على توكن واحد فقط، سيتم استخدامه كخيار بديل.")
+                    logger.warning(f"⚠️ تم رصد توكن واحد فقط، سيتم استخدامه كخيار اضطراري.")
                 else:
-                    logger.error("❌ لم يتم التقاط أي توكن كابتشا من الشبكة. إجهاض العملية.")
+                    logger.error("❌ لم يتم التقاط أي توكن كابتشا من الشبكة بسبب توقف السكربت. إجهاض العملية.")
                     browser.close()
                     return False
                 
-                # نسخ هوية الجلسة قبل إغلاق المتصفح
+                # نسخ هوية الجلسة بالكامل قبل إغلاق محرك المتصفح
                 self._handover_cookies(context)
                 
             except Exception as e:
-                logger.error(f"❌ خطأ غير متوقع في بيئة المتصفح: {e}")
+                logger.error(f"❌ خطأ غير متوقع في بيئة المتصفح الرسومية: {e}")
                 browser.close()
                 return False
             
             browser.close()
-            logger.info("🛑 تم إغلاق المتصفح بنجاح وتوفير كافة موارد النظام.")
+            logger.info("🛑 تم إغلاق المتصفح بنجاح وتحرير كامل موارد الخادم الحية.")
 
         # --- المرحلة الثانية: تنفيذ طلب الـ POST والتسجيل الفعلي عبر Requests السريعة ---
-        logger.info("🚀 [المرحلة 2] المتابعة السريعة عبرRequests HTTP Client...")
+        logger.info("🚀 [المرحلة 2] المتابعة السريعة والخفيفة عبر بروتوكول HTTP...")
         
         self.session.headers.update({
             'User-Agent': self.user_agent,
@@ -150,11 +165,11 @@ class OptimizedHybridWooCommerceEngine:
             'Content-Type': 'application/x-www-form-urlencoded'
         })
 
-        # دمج التوكن الثاني بدقة داخل حزمة البيانات المرسلة للـ POST
+        # دمج التوكن الثاني الموثوق بدقة داخل حزمة الـ POST
         post_data = {
             'email': payload.email,
             'password': payload.password,
-            'g-recaptcha-response': target_captcha_token, # حقن التوكن الثاني هنا
+            'g-recaptcha-response': target_captcha_token,
             'woocommerce-register-nonce': self.register_nonce,
             '_wp_http_referer': '/my-account/',
             'register': 'Register',
@@ -162,11 +177,11 @@ class OptimizedHybridWooCommerceEngine:
 
         try:
             # 1. إرسال طلب إنشاء الحساب مباشرة عبر البروتوكول
-            logger.info("📡 إرسال طلب الـ POST الفعلي للتسجيل...")
+            logger.info("📡 إرسال طلب الـ POST الفعلي للتسجيل الحسابي...")
             self.session.post("https://greenmethods.com/my-account/", data=post_data, timeout=20)
             
             # 2. الانتقال الفوري لصفحة العناوين للتأكد من نجاح التوثيق واستخراج النونس الثاني
-            logger.info("📬 طلب صفحة تحرير العناوين لاستخراج الـ Address Nonce...")
+            logger.info("📬 جلب صفحة تحرير العناوين لاستخلاص الـ Address Nonce المستهدف...")
             addr_response = self.session.get("https://greenmethods.com/my-account/edit-address/billing/", timeout=15)
             
             if addr_response.status_code == 200:
@@ -176,16 +191,16 @@ class OptimizedHybridWooCommerceEngine:
                     logger.info(f"🏆 [نجاح بروتوكولي باهر] تم التسجيل واستخراج Address Nonce بنجاح: {self.address_nonce}")
                     return True
                 else:
-                    logger.error("❌ لم يتم العثور على Address Nonce. يبدو أن الخادم رفض التوكن الثاني أو هناك حظر IP.")
+                    logger.error("❌ لم يتم العثور على Address Nonce. يبدو أن السيرفر رفض التوكن الثاني أو انتهت الجلسة.")
             else:
-                logger.error(f"❌ فشل في جلب الصفحة، كود الاستجابة: {addr_response.status_code}")
+                logger.error(f"❌ فشل في جلب الصفحة، كود استجابة الخادم: {addr_response.status_code}")
 
         except Exception as e:
-            logger.critical(f"💥 خطأ بروتوكولي أثناء معالجة الطلبات: {e}")
+            logger.critical(f"💥 خطأ بروتوكولي أثناء معالجة الطلبات السريعة: {e}")
 
         return False
 
 if __name__ == "__main__":
     engine = OptimizedHybridWooCommerceEngine()
     success = engine.execute()
-    print(f"\n📈 الحالة الهندسية النهائية: {'✅ SUCCESS' if success else '❌ FAILED'}")
+    print(f"\n📈 الحالة الهندسية النهائية للمشروع: {'✅ SUCCESS' if success else '❌ FAILED'}")
