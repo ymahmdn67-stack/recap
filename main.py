@@ -1,177 +1,203 @@
-import sys
-import subprocess
+from __future__ import annotations
+
+import argparse
 import asyncio
+import hashlib
 import re
-from faker import Faker
-from curl_cffi.requests import AsyncSession
-from playwright.async_api import async_playwright
+import shutil
+import sys
+import zipfile
+from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-# --- 1. قسم الفحص والتثبيت الصامت لـ Playwright ---
-def ensure_playwright_ready():
-    try:
-        import playwright
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
+try:
+    from playwright.async_api import BrowserContext, Page, Response, async_playwright
+except ImportError:
+    print("Playwright is not installed. Run: python3 -m pip install playwright", file=sys.stderr)
+    raise SystemExit(2)
 
-    try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            browser.close()
-    except Exception:
+USER_AGENT = "Authorized-Sources-Capture/1.0"
+JS_TYPES = {"script", "text/javascript", "application/javascript", "application/x-javascript"}
+MAX_DEFAULT = 50 * 1024 * 1024
+
+
+def clean_url(url: str) -> str:
+    p = urlparse(url)
+    query = urlencode(sorted(parse_qsl(p.query, keep_blank_values=True)))
+    return urlunparse((p.scheme.lower(), p.netloc.lower(), p.path or "/", "", query, ""))
+
+
+def safe_name(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", value) or "unknown"
+
+
+def local_path(url: str, root: Path) -> Path:
+    p = urlparse(url)
+    host = safe_name(p.netloc)
+    segments = [safe_name(part) for part in p.path.split("/") if part not in {"", ".", ".."}]
+    if not segments:
+        segments = ["index"]
+    if p.path.endswith("/"):
+        segments.append("index")
+    filename = segments[-1]
+    if p.query:
+        digest = hashlib.sha256(p.query.encode()).hexdigest()[:12]
+        stem, dot, suffix = filename.rpartition(".")
+        filename = f"{stem if dot else filename}__q_{digest}{('.' + suffix) if dot else ''}"
+    segments[-1] = filename
+    target = (root / host / Path(*segments)).resolve()
+    if root.resolve() not in target.parents:
+        raise ValueError(f"Unsafe path: {url}")
+    return target
+
+
+def content_is_javascript(response: Response) -> bool:
+    content_type = (response.headers.get("content-type") or "").split(";", 1)[0].lower()
+    path = urlparse(response.url).path.lower()
+    return response.request.resource_type in {"script", "worker"} or content_type in JS_TYPES or path.endswith((".js", ".mjs", ".cjs"))
+
+
+class Capture:
+    def __init__(self, root_url: str, output: Path, args: argparse.Namespace) -> None:
+        self.root_url = root_url
+        self.output = output
+        self.args = args
+        self.seen: set[str] = set()
+        self.saved = 0
+        self.skipped = 0
+        self.errors = 0
+
+    async def save_response(self, response: Response) -> None:
+        url = clean_url(response.url)
+        if url in self.seen or url.startswith(("data:", "blob:", "file:")):
+            return
+        self.seen.add(url)
+        if not self.args.all_resources and not content_is_javascript(response):
+            return
         try:
-            subprocess.check_call([sys.executable, "-m", "playwright", "install", "--with-deps"])
-        except Exception:
-            sys.exit(1)
+            body = await response.body()
+            if len(body) > self.args.max_bytes:
+                self.skipped += 1
+                print(f"[SKIP: TOO LARGE] {url}")
+                return
+            target = local_path(url, self.output)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(body)
+            self.saved += 1
+            print(f"[+] {response.status} {url} -> {target.relative_to(self.output)} ({len(body):,} bytes)")
+        except Exception as exc:
+            self.errors += 1
+            print(f"[ERROR] Could not save response body {url}: {exc}", file=sys.stderr)
 
-ensure_playwright_ready()
+    async def handle_page(self, page: Page) -> None:
+        page.on("response", self.save_response)
+        try:
+            print(f"[*] Opening: {self.root_url}")
+            await page.goto(self.root_url, wait_until="domcontentloaded", timeout=self.args.timeout * 1000)
+            await page.wait_for_timeout(self.args.wait * 1000)
+            for _ in range(self.args.scrolls):
+                await page.mouse.wheel(0, 1200)
+                await page.wait_for_timeout(500)
+            await page.wait_for_timeout(self.args.wait * 1000)
+        except Exception as exc:
+            print(f"[ERROR] Could not load page: {exc}", file=sys.stderr)
+
+    async def crawl(self, context: BrowserContext) -> None:
+        page = await context.new_page()
+        await self.handle_page(page)
+        if self.args.depth > 0:
+            links = await page.locator("a[href]").evaluate_all("els => els.map(e => e.href)")
+            root_host = (urlparse(self.root_url).hostname or "").lower()
+            visited: set[str] = {clean_url(self.root_url)}
+            for link in links[: self.args.max_pages]:
+                parsed = urlparse(link)
+                if parsed.scheme not in {"http", "https"} or (parsed.hostname or "").lower() != root_host:
+                    continue
+                normalized = clean_url(link)
+                if normalized in visited:
+                    continue
+                visited.add(normalized)
+                child = await context.new_page()
+                old_url = self.root_url
+                self.root_url = normalized
+                await self.handle_page(child)
+                self.root_url = old_url
+                await child.close()
+        await page.close()
+
+    def make_zip(self) -> Path:
+        script_dir = Path(__file__).resolve().parent
+        host = safe_name(urlparse(self.root_url).netloc)
+        archive = script_dir / f"{host}_sources_archive.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for file in sorted(self.output.rglob("*")):
+                if file.is_file():
+                    zf.write(file, file.relative_to(self.output))
+        return archive
 
 
-# --- 2. دالة استخراج توكن الكابتشا ---
-async def get_captcha_token():
-    cap_container = {"value": None}
+async def run(args: argparse.Namespace) -> int:
+    root = clean_url(args.url)
+    parsed = urlparse(root)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        print("The URL must start with http:// or https://", file=sys.stderr)
+        return 2
+    script_dir = Path(__file__).resolve().parent
+    host = safe_name(parsed.netloc)
+    output = Path(args.output).expanduser().resolve() if args.output else script_dir / f"{host}_sources_files"
+    if output.exists() and args.clean:
+        shutil.rmtree(output)
+    output.mkdir(parents=True, exist_ok=True)
+    capture = Capture(root, output, args)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=not args.headed)
+        context = await browser.new_context(ignore_https_errors=args.ignore_https_errors, user_agent=USER_AGENT)
+        try:
+            await capture.crawl(context)
+        finally:
+            await context.close()
+            await browser.close()
+    archive = capture.make_zip()
+    mode = "all resources" if args.all_resources else "JavaScript resources only"
+    print(f"\nCapture completed ({mode}).")
+    print(f"Saved {capture.saved} files, skipped {capture.skipped} oversized files, and failed {capture.errors} files.")
+    print(f"Output directory: {output}")
+    print(f"ZIP archive: {archive}")
+    if capture.saved == 0:
+        print("[WARNING] No content was saved. The page may require login or block automated browsers.", file=sys.stderr)
+    return 0
 
-    async def handle_response(response):
-        if "recaptcha/api2/reload" in response.url:
-            try:
-                body = await response.text()
-                m = re.search(r'rresp","(.+?)"', body)
-                if m:
-                    cap_container["value"] = m.group(1)
-            except Exception:
-                pass
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True) 
-        page = await browser.new_page()
-        page.on("response", handle_response)
-        await page.goto("https://greenmethods.com/my-account/")
-        
-        while cap_container["value"] is None:
-            await page.wait_for_timeout(1000)
-            
-        cap = cap_container["value"]
-        await browser.close()
-        return cap
+def arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Capture browser-loaded resource bodies and save them by domain and URL path")
+    parser.add_argument("url", nargs="?", help="Site URL; if omitted, it will be requested interactively")
+    parser.add_argument("--output", "-o", help="Output directory; defaults to a folder next to this Python file")
+    parser.add_argument("--wait", type=float, default=5, help="Seconds to wait after loading (default: 5)")
+    parser.add_argument("--scrolls", type=int, default=3, help="Scroll count to trigger lazy loading (default: 3)")
+    parser.add_argument("--depth", type=int, default=0, help="Additional internal page depth (default: 0)")
+    parser.add_argument("--max-pages", type=int, default=10, help="Maximum number of additional pages")
+    parser.add_argument("--all-resources", action="store_true", help="Save every captured resource, not only JavaScript")
+    parser.add_argument("--max-bytes", type=int, default=MAX_DEFAULT, help="Maximum size per resource")
+    parser.add_argument("--timeout", type=int, default=45, help="Page load timeout in seconds")
+    parser.add_argument("--clean", action="store_true", help="Delete the previous output directory first")
+    parser.add_argument("--headed", action="store_true", help="Run Chromium with a visible window")
+    parser.add_argument("--ignore-https-errors", action="store_true", help="Ignore HTTPS certificate errors")
+    return parser.parse_args()
 
 
-# --- 3. الدالة الأساسية للربط والطلبات المتتالية ---
-async def main():
-    # استخراج توكن الكابتشا وحفظه في متغير cap
-    cap = await get_captcha_token()
-    
-    if not cap:
-        print("Fails to get token.")
-        return
+def main() -> int:
+    args = arguments()
+    if not args.url:
+        args.url = input("Enter the URL of a site you own or are authorized to test: ").strip()
+    if args.wait < 0 or args.scrolls < 0 or args.depth < 0 or args.max_pages < 0:
+        print("Wait and crawl values cannot be negative.", file=sys.stderr)
+        return 2
+    try:
+        return asyncio.run(run(args))
+    except KeyboardInterrupt:
+        print("\nStopped.", file=sys.stderr)
+        return 130
 
-    # إعداد البيانات الوهمية للمستخدم الجديد
-    fake = Faker("en_UK")
-    f = fake.first_name()
-    l = fake.last_name()
-    e = f"{f.lower()}.{l.lower()}@gmail.com"
-    
-    # تعيين User-Agent حقيقي لمتصفح Chrome (Android) متوافق مع بنية الـ headers الحالية
-    REAL_USER_AGENT = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36'
-
-    # بدء جلسة curl_cffi الموحدة للحفاظ على الكوكيز والاتصال تلقائياً
-    async with AsyncSession(impersonate="chrome120") as r:
-        
-        # --- الطلب الأول (GET): لصفحة الحساب لاستخراج الـ register nonce ---
-        headers_get = {
-            'authority': 'greenmethods.com',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
-            'cache-control': 'max-age=0',
-            'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
-            'sec-ch-ua-mobile': '?1',
-            'sec-ch-ua-platform': '"Android"',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'none',
-            'sec-fetch-user': '?1',
-            'upgrade-insecure-requests': '1',
-            'user-agent': REAL_USER_AGENT,
-        }
-
-        response = await r.get('https://greenmethods.com/my-account/', headers=headers_get)
-
-        register_nonce = ""
-        non = re.search(r'name="woocommerce-register-nonce"[^>]*value="([^"]+)"', response.text)
-        if non:
-            register_nonce = non.group(1)
-
-        # --- الطلب الثاني (POST): إرسال بيانات التسجيل مع توكن الكابتشا cap ---
-        headers_post = {
-            'authority': 'greenmethods.com',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
-            'cache-control': 'max-age=0',
-            'content-type': 'application/x-www-form-urlencoded',
-            'origin': 'https://greenmethods.com',
-            'referer': 'https://greenmethods.com/my-account/',
-            'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
-            'sec-ch-ua-mobile': '?1',
-            'sec-ch-ua-platform': '"Android"',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'same-origin',
-            'sec-fetch-user': '?1',
-            'upgrade-insecure-requests': '1',
-            'user-agent': REAL_USER_AGENT,
-        }
-
-        data = {
-            'email': e,
-            'password': 'Williams#123CR7',
-            'g-recaptcha-response': cap,
-            'wc_order_attribution_source_type': 'typein',
-            'wc_order_attribution_referrer': '(none)',
-            'wc_order_attribution_utm_campaign': '(none)',
-            'wc_order_attribution_utm_source': '(direct)',
-            'wc_order_attribution_utm_medium': '(none)',
-            'wc_order_attribution_utm_content': '(none)',
-            'wc_order_attribution_utm_id': '(none)',
-            'wc_order_attribution_utm_term': '(none)',
-            'wc_order_attribution_utm_source_platform': '(none)',
-            'wc_order_attribution_utm_creative_format': '(none)',
-            'wc_order_attribution_utm_marketing_tactic': '(none)',
-            'wc_order_attribution_session_entry': 'https://greenmethods.com/my-account/',
-            'wc_order_attribution_session_start_time': '2026-07-09 22:38:43',
-            'wc_order_attribution_session_pages': '2',
-            'wc_order_attribution_session_count': '1',
-            'wc_order_attribution_user_agent': REAL_USER_AGENT,
-            'woocommerce-register-nonce': register_nonce,
-            '_wp_http_referer': '/my-account/',
-            'register': 'Register',
-        }
-
-        await r.post('https://greenmethods.com/my-account/', headers=headers_post, data=data)
-
-        # --- الطلب الثالث (GET): الانتقال لصفحة تعديل العنوان لاستخراج التوكن المطلوبة ---
-        headers_billing = {
-            'authority': 'greenmethods.com',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'accept-language': 'ar-IQ,ar;q=0.9,en-US;q=0.8,en;q=0.7',
-            'referer': 'https://greenmethods.com/my-account/edit-address/',
-            'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
-            'sec-ch-ua-mobile': '?1',
-            'sec-ch-ua-platform': '"Android"',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'same-origin',
-            'sec-fetch-user': '?1',
-            'upgrade-insecure-requests': '1',
-            'user-agent': REAL_USER_AGENT,
-        }
-
-        response_billing = await r.get('https://greenmethods.com/my-account/edit-address/billing/', headers=headers_billing)
-
-        # استخراج woocommerce-edit-address-nonce وطباعته
-        non_edit = re.search(r'name="woocommerce-edit-address-nonce" value="([^"]+)"', response_billing.text)
-        if non_edit:
-            print(f"Success! Edit Address Nonce: {non_edit.group(1)}")
-        else:
-            print("Failed to get edit address nonce.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(main())
