@@ -1,203 +1,221 @@
-from __future__ import annotations
-
-import argparse
 import asyncio
-import hashlib
-import re
-import shutil
-import sys
-import zipfile
-from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+import os
+from dataclasses import dataclass, field
+from typing import Optional
+from urllib.parse import urlparse
 
-try:
-    from playwright.async_api import BrowserContext, Page, Response, async_playwright
-except ImportError:
-    print("Playwright is not installed. Run: python3 -m pip install playwright", file=sys.stderr)
-    raise SystemExit(2)
-
-USER_AGENT = "Authorized-Sources-Capture/1.0"
-JS_TYPES = {"script", "text/javascript", "application/javascript", "application/x-javascript"}
-MAX_DEFAULT = 50 * 1024 * 1024
+from camoufox.async_api import AsyncCamoufox
 
 
-def clean_url(url: str) -> str:
-    p = urlparse(url)
-    query = urlencode(sorted(parse_qsl(p.query, keep_blank_values=True)))
-    return urlunparse((p.scheme.lower(), p.netloc.lower(), p.path or "/", "", query, ""))
+TARGET_URL = "https://example.com/"
 
 
-def safe_name(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]", "_", value) or "unknown"
+@dataclass
+class GateResult:
+    cleared: bool
+    cookie: Optional[str] = None
+    token: Optional[str] = None
+    cookies: dict = field(default_factory=dict)
+    challenge_type: str = "unknown"
+    error: Optional[str] = None
 
 
-def local_path(url: str, root: Path) -> Path:
-    p = urlparse(url)
-    host = safe_name(p.netloc)
-    segments = [safe_name(part) for part in p.path.split("/") if part not in {"", ".", ".."}]
-    if not segments:
-        segments = ["index"]
-    if p.path.endswith("/"):
-        segments.append("index")
-    filename = segments[-1]
-    if p.query:
-        digest = hashlib.sha256(p.query.encode()).hexdigest()[:12]
-        stem, dot, suffix = filename.rpartition(".")
-        filename = f"{stem if dot else filename}__q_{digest}{('.' + suffix) if dot else ''}"
-    segments[-1] = filename
-    target = (root / host / Path(*segments)).resolve()
-    if root.resolve() not in target.parents:
-        raise ValueError(f"Unsafe path: {url}")
-    return target
+class CloudflareGate:
+    TURNSTILE_IFRAME = "iframe[src*='challenges.cloudflare.com']"
+    CHALLENGE_MARKERS = (
+        "Just a moment",
+        "Checking your browser",
+        "cf-browser-verification",
+        "challenge-platform",
+    )
+    TURNSTILE_INPUT = "input[name='cf-turnstile-response']"
+    TURNSTILE_TEXTAREA = "textarea[name='cf-turnstile-response']"
 
+    def __init__(
+        self,
+        target_url: str,
+        proxy: Optional[str] = None,
+        headless: bool = True,
+        timeout: int = 60000,
+        poll_interval: float = 1.0,
+    ):
+        parsed = urlparse(target_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError(f"invalid target url: {target_url}")
 
-def content_is_javascript(response: Response) -> bool:
-    content_type = (response.headers.get("content-type") or "").split(";", 1)[0].lower()
-    path = urlparse(response.url).path.lower()
-    return response.request.resource_type in {"script", "worker"} or content_type in JS_TYPES or path.endswith((".js", ".mjs", ".cjs"))
+        self.url = target_url
+        self.proxy = proxy
+        self.headless = headless
+        self.timeout = timeout
+        self.poll_interval = poll_interval
 
+    def _launch(self):
+        options = {"headless": self.headless}
+        if self.proxy:
+            options["proxy"] = {"server": self.proxy}
+        return AsyncCamoufox(**options)
 
-class Capture:
-    def __init__(self, root_url: str, output: Path, args: argparse.Namespace) -> None:
-        self.root_url = root_url
-        self.output = output
-        self.args = args
-        self.seen: set[str] = set()
-        self.saved = 0
-        self.skipped = 0
-        self.errors = 0
+    async def _detect_challenge(self, page) -> str:
+        html = (await page.content()) or ""
+        if "challenges.cloudflare.com" in html or "cf-turnstile" in html:
+            return "turnstile"
 
-    async def save_response(self, response: Response) -> None:
-        url = clean_url(response.url)
-        if url in self.seen or url.startswith(("data:", "blob:", "file:")):
-            return
-        self.seen.add(url)
-        if not self.args.all_resources and not content_is_javascript(response):
-            return
+        for marker in self.CHALLENGE_MARKERS:
+            if marker.lower() in html.lower():
+                return "challenge"
+
+        return "clear"
+
+    async def _wait_turnstile_token(self, page) -> Optional[str]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout / 1000
+
+        while loop.time() < deadline:
+            try:
+                token = await page.evaluate(
+                    f"""
+                    (() => {{
+                        const el = document.querySelector("{self.TURNSTILE_INPUT}")
+                                 || document.querySelector("{self.TURNSTILE_TEXTAREA}");
+                        return el ? el.value : null;
+                    }})()
+                    """
+                )
+                if token and len(token) > 20:
+                    return token
+            except Exception:
+                pass
+
+            try:
+                clicked = await page.evaluate(
+                    f"""
+                    (() => {{
+                        const iframe = document.querySelector("{self.TURNSTILE_IFRAME}");
+                        if (!iframe) return false;
+                        const rect = iframe.getBoundingClientRect();
+                        return {{x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}};
+                    }})()
+                    """
+                )
+                if clicked and isinstance(clicked, dict):
+                    await page.mouse.click(clicked["x"], clicked["y"])
+            except Exception:
+                pass
+
+            await asyncio.sleep(self.poll_interval)
+
+        return None
+
+    async def _wait_clearance(self, page):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout / 1000
+
+        while loop.time() < deadline:
+            cookies = await page.context.cookies()
+
+            for cookie in cookies:
+                if cookie["name"] == "cf_clearance" and cookie["value"]:
+                    return cookie["value"], {
+                        item["name"]: item["value"] for item in cookies
+                    }
+
+            await asyncio.sleep(self.poll_interval)
+
+        return None, {}
+
+    async def solve(self) -> GateResult:
+        kind = "unknown"
+
         try:
-            body = await response.body()
-            if len(body) > self.args.max_bytes:
-                self.skipped += 1
-                print(f"[SKIP: TOO LARGE] {url}")
-                return
-            target = local_path(url, self.output)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(body)
-            self.saved += 1
-            print(f"[+] {response.status} {url} -> {target.relative_to(self.output)} ({len(body):,} bytes)")
+            async with self._launch() as browser:
+                page = await browser.new_page()
+                await page.goto(self.url)
+                await asyncio.sleep(2)
+
+                kind = await self._detect_challenge(page)
+
+                if kind == "turnstile":
+                    token = await self._wait_turnstile_token(page)
+
+                    if token:
+                        cookies = await page.context.cookies()
+                        return GateResult(
+                            cleared=True,
+                            token=token,
+                            cookies={
+                                cookie["name"]: cookie["value"]
+                                for cookie in cookies
+                            },
+                            challenge_type="turnstile",
+                        )
+
+                    return GateResult(
+                        cleared=False,
+                        challenge_type="turnstile",
+                        error="turnstile token timeout",
+                    )
+
+                if kind == "challenge":
+                    cookie, jar = await self._wait_clearance(page)
+
+                    if cookie:
+                        return GateResult(
+                            cleared=True,
+                            cookie=cookie,
+                            cookies=jar,
+                            challenge_type="challenge",
+                        )
+
+                    return GateResult(
+                        cleared=False,
+                        challenge_type="challenge",
+                        error="cf_clearance timeout",
+                    )
+
+                cookies = await page.context.cookies()
+                return GateResult(
+                    cleared=True,
+                    cookies={
+                        cookie["name"]: cookie["value"]
+                        for cookie in cookies
+                    },
+                    challenge_type="clear",
+                )
+
         except Exception as exc:
-            self.errors += 1
-            print(f"[ERROR] Could not save response body {url}: {exc}", file=sys.stderr)
-
-    async def handle_page(self, page: Page) -> None:
-        page.on("response", self.save_response)
-        try:
-            print(f"[*] Opening: {self.root_url}")
-            await page.goto(self.root_url, wait_until="domcontentloaded", timeout=self.args.timeout * 1000)
-            await page.wait_for_timeout(self.args.wait * 1000)
-            for _ in range(self.args.scrolls):
-                await page.mouse.wheel(0, 1200)
-                await page.wait_for_timeout(500)
-            await page.wait_for_timeout(self.args.wait * 1000)
-        except Exception as exc:
-            print(f"[ERROR] Could not load page: {exc}", file=sys.stderr)
-
-    async def crawl(self, context: BrowserContext) -> None:
-        page = await context.new_page()
-        await self.handle_page(page)
-        if self.args.depth > 0:
-            links = await page.locator("a[href]").evaluate_all("els => els.map(e => e.href)")
-            root_host = (urlparse(self.root_url).hostname or "").lower()
-            visited: set[str] = {clean_url(self.root_url)}
-            for link in links[: self.args.max_pages]:
-                parsed = urlparse(link)
-                if parsed.scheme not in {"http", "https"} or (parsed.hostname or "").lower() != root_host:
-                    continue
-                normalized = clean_url(link)
-                if normalized in visited:
-                    continue
-                visited.add(normalized)
-                child = await context.new_page()
-                old_url = self.root_url
-                self.root_url = normalized
-                await self.handle_page(child)
-                self.root_url = old_url
-                await child.close()
-        await page.close()
-
-    def make_zip(self) -> Path:
-        script_dir = Path(__file__).resolve().parent
-        host = safe_name(urlparse(self.root_url).netloc)
-        archive = script_dir / f"{host}_sources_archive.zip"
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for file in sorted(self.output.rglob("*")):
-                if file.is_file():
-                    zf.write(file, file.relative_to(self.output))
-        return archive
+            return GateResult(
+                cleared=False,
+                challenge_type=kind,
+                error=str(exc),
+            )
 
 
-async def run(args: argparse.Namespace) -> int:
-    root = clean_url(args.url)
-    parsed = urlparse(root)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        print("The URL must start with http:// or https://", file=sys.stderr)
-        return 2
-    script_dir = Path(__file__).resolve().parent
-    host = safe_name(parsed.netloc)
-    output = Path(args.output).expanduser().resolve() if args.output else script_dir / f"{host}_sources_files"
-    if output.exists() and args.clean:
-        shutil.rmtree(output)
-    output.mkdir(parents=True, exist_ok=True)
-    capture = Capture(root, output, args)
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=not args.headed)
-        context = await browser.new_context(ignore_https_errors=args.ignore_https_errors, user_agent=USER_AGENT)
-        try:
-            await capture.crawl(context)
-        finally:
-            await context.close()
-            await browser.close()
-    archive = capture.make_zip()
-    mode = "all resources" if args.all_resources else "JavaScript resources only"
-    print(f"\nCapture completed ({mode}).")
-    print(f"Saved {capture.saved} files, skipped {capture.skipped} oversized files, and failed {capture.errors} files.")
-    print(f"Output directory: {output}")
-    print(f"ZIP archive: {archive}")
-    if capture.saved == 0:
-        print("[WARNING] No content was saved. The page may require login or block automated browsers.", file=sys.stderr)
-    return 0
-
-
-def arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Capture browser-loaded resource bodies and save them by domain and URL path")
-    parser.add_argument("url", nargs="?", help="Site URL; if omitted, it will be requested interactively")
-    parser.add_argument("--output", "-o", help="Output directory; defaults to a folder next to this Python file")
-    parser.add_argument("--wait", type=float, default=5, help="Seconds to wait after loading (default: 5)")
-    parser.add_argument("--scrolls", type=int, default=3, help="Scroll count to trigger lazy loading (default: 3)")
-    parser.add_argument("--depth", type=int, default=0, help="Additional internal page depth (default: 0)")
-    parser.add_argument("--max-pages", type=int, default=10, help="Maximum number of additional pages")
-    parser.add_argument("--all-resources", action="store_true", help="Save every captured resource, not only JavaScript")
-    parser.add_argument("--max-bytes", type=int, default=MAX_DEFAULT, help="Maximum size per resource")
-    parser.add_argument("--timeout", type=int, default=45, help="Page load timeout in seconds")
-    parser.add_argument("--clean", action="store_true", help="Delete the previous output directory first")
-    parser.add_argument("--headed", action="store_true", help="Run Chromium with a visible window")
-    parser.add_argument("--ignore-https-errors", action="store_true", help="Ignore HTTPS certificate errors")
-    return parser.parse_args()
-
-
-def main() -> int:
-    args = arguments()
-    if not args.url:
-        args.url = input("Enter the URL of a site you own or are authorized to test: ").strip()
-    if args.wait < 0 or args.scrolls < 0 or args.depth < 0 or args.max_pages < 0:
-        print("Wait and crawl values cannot be negative.", file=sys.stderr)
-        return 2
-    try:
-        return asyncio.run(run(args))
-    except KeyboardInterrupt:
-        print("\nStopped.", file=sys.stderr)
-        return 130
+async def main(
+    proxy: Optional[str] = None,
+    headless: bool = True,
+) -> GateResult:
+    gate = CloudflareGate(
+        target_url=TARGET_URL,
+        proxy=proxy,
+        headless=headless,
+    )
+    result = await gate.solve()
+    return result
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--proxy", default=os.environ.get("CF_PROXY"))
+    parser.add_argument("--headed", action="store_true")
+    args = parser.parse_args()
+
+    result = asyncio.run(main(proxy=args.proxy, headless=not args.headed))
+
+    print("Cleared:", result.cleared)
+    print("Challenge type:", result.challenge_type)
+    print("Token present:", bool(result.token))
+    print("cf_clearance present:", bool(result.cookies.get("cf_clearance")))
+    print("Cookie count:", len(result.cookies))
+    print("Error:", result.error)
