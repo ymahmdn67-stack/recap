@@ -1,12 +1,13 @@
 import asyncio
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
 
-TARGET_URL = "https://pureprescriptions.com/"
+TARGET_URL = "https://pureprescriptions.com/my-account/add-payment-method/"
 
 @dataclass
 class GateResult:
@@ -242,9 +243,17 @@ if __name__ == "__main__":
     parser.add_argument("--headed", action="store_true")
     args = parser.parse_args()
 
-    # يمكنك وضع البروكسي مباشرة هنا إذا لم ترغب بتمريره من سطر الأوامر
-    MY_PROXY = None
+    # البروكسي الآن يعتمد فقط على ما يتم تمريره من سطر الأوامر (أو None)
+    MY_PROXY = args.proxy
+
+    # ⏱️ بداية العداد
+    start_time = time.time()
+
     result = asyncio.run(main(proxy=MY_PROXY, headless=not args.headed))
+
+    # ⏱️ نهاية العداد وحساب الفارق
+    end_time = time.time()
+    elapsed_time = end_time - start_time
 
     print("\n" + "="*40)
     print("📊 [FINAL DIAGNOSTIC SUMMARY]")
@@ -263,12 +272,12 @@ if __name__ == "__main__":
     )
     print("Cookie count:", len(result.cookies))
     print("Error:", result.error)
+    print(f"⏱️ Execution Time: {elapsed_time:.2f} seconds")
     
     print("\n" + "="*40)
     print("🔑 [RAW DATA - TOKEN & COOKIES]")
     print("="*40)
     
-    # طباعة التوكن الحقيقي
     print("Token:")
     print(result.token if result.token else "None (No token found)")
     
