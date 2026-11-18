@@ -244,8 +244,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # ✅ تم إرجاع البروكسي هنا في هذه النسخة
-    MY_PROXY = args.proxy or "http://krake73891:kraken@proxies.toolz.ovh:8443"
-
+    MY_PROXY = None
     # ⏱️ بداية العداد
     start_time = time.time()
 
