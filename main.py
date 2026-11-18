@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
 
-TARGET_URL = "https://pureprescriptions.com/my-account/add-payment-method/"
+TARGET_URL = "https://pureprescriptions.com/"
 
 @dataclass
 class GateResult:
@@ -243,8 +243,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # يمكنك وضع البروكسي مباشرة هنا إذا لم ترغب بتمريره من سطر الأوامر
-    MY_PROXY = args.proxy or "http://krake73891:kraken@proxies.toolz.ovh:8443"
-
+    MY_PROXY = None
     result = asyncio.run(main(proxy=MY_PROXY, headless=not args.headed))
 
     print("\n" + "="*40)
