@@ -1,38 +1,47 @@
 import sys
 import subprocess
 
+
 def run_command(command_list):
-    """دالة مساعدة لتنفيذ الأوامر بأمان"""
     try:
         subprocess.check_call(command_list)
         return True
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, OSError):
         print(f"❌ فشل تنفيذ الأمر: {' '.join(command_list)}")
         return False
 
+
 def main():
-    print("🚀 بدء تهيئة وتثبيت البيئة البرمجية بالكامل...")
+    print("🚀 بدء تهيئة وتثبيت البيئة البرمجية...")
 
-    # 1. ترقية أداة pip لحل مشكلة عدم العثور على الحزم الظاهرة في الصورة
-    print("\n🔄 [خطوة 1] جاري ترقية أداة pip إلى أحدث إصدار...")
-    run_command([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+    print("\n🔄 [خطوة 1] جاري ترقية pip...")
+    if not run_command([
+        sys.executable, "-m", "pip", "install", "--upgrade", "pip"
+    ]):
+        return
 
-    # 2. تثبيت المكتبات الأساسية المطلوبة للسكربت
-    required_libraries = ["faker", "curl_cffi", "playwright"]
-    print(f"\n📦 [خطوة 2] جاري تثبيت المكتبات الأساسية: {', '.join(required_libraries)}")
-    
+    required_libraries = ["faker", "curl_cffi", "camoufox"]
+    print(
+        f"\n📦 [خطوة 2] جاري تثبيت المكتبات: "
+        f"{', '.join(required_libraries)}"
+    )
+
     for library in required_libraries:
         print(f"⏳ جاري تثبيت {library}...")
-        run_command([sys.executable, "-m", "pip", "install", library])
+        if not run_command([
+            sys.executable, "-m", "pip", "install", library
+        ]):
+            return
 
-    # 3. تحميل المتصفحات والملفات الاعتمادية لنظام التشغيل (Linux/Codespaces)
-    print("\n⚙️ [خطوة 3] جاري تحميل متصفحات وملفات نظام Playwright (قد يستغرق ذلك دقيقة)...")
-    success = run_command([sys.executable, "-m", "playwright", "install", "--with-deps"])
+    print("\n⚙️ [خطوة 3] جاري تحميل متصفح Camoufox...")
+    if not run_command([
+        sys.executable, "-m", "camoufox", "fetch"
+    ]):
+        return
 
-    if success:
-        print("\n✨ تم إعداد بيئة العمل بالكامل بنجاح! يمكنك الآن تشغيل كود التسجيل الأساسي بدون مشاكل.")
-    else:
-        print("\n⚠️ تم تثبيت المكتبات، ولكن واجه السكربت مشكلة في تحميل متصفحات النظام.")
+    print("\n✨ تم تثبيت المكتبات وتنزيل متصفح Camoufox بنجاح.")
+    print("قد يحتاج Linux إلى مكتبات نظام إضافية لتشغيل المتصفح.")
+
 
 if __name__ == "__main__":
     main()
