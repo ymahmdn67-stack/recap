@@ -1,31 +1,25 @@
 import asyncio
-import json
-import logging
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
-from curl_cffi import requests as cffi_requests
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("cfgate")
+TARGET_URL = "https://pureprescriptions.com/my-account/add-payment-method/"
 
 @dataclass
 class GateResult:
     cleared: bool
     cookie: Optional[str] = None
     token: Optional[str] = None
-    user_agent: Optional[str] = None
-    cookies: dict = field(default_factory=dict)
+    cookies: list = field(default_factory=list)
     challenge_type: str = "unknown"
     error: Optional[str] = None
+    page_url: Optional[str] = None
+    page_title: Optional[str] = None
 
 class CloudflareGate:
-    """Solves Cloudflare Challenge (cookie) and Turnstile (token) with a real browser."""
-    
     TURNSTILE_IFRAME = "iframe[src*='challenges.cloudflare.com']"
     CHALLENGE_MARKERS = (
         "Just a moment",
@@ -47,6 +41,7 @@ class CloudflareGate:
         parsed = urlparse(target_url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError(f"invalid target url: {target_url}")
+
         self.url = target_url
         self.proxy = proxy
         self.headless = headless
@@ -55,7 +50,6 @@ class CloudflareGate:
 
     def _launch(self):
         options = {"headless": self.headless}
-        
         if self.proxy:
             parsed_proxy = urlparse(self.proxy)
             proxy_config = {
@@ -65,41 +59,37 @@ class CloudflareGate:
                 proxy_config["username"] = parsed_proxy.username
                 proxy_config["password"] = parsed_proxy.password
             options["proxy"] = proxy_config
-            
         return AsyncCamoufox(**options)
 
-    async def _detect_challenge(self, page) -> str:
+    async def _detect_challenge(self, page) -> tuple[str, Optional[str]]:
         try:
-            if page.is_closed():
-                return "closed"
-            html = (await page.content()) or ""
-            
-            if "challenges.cloudflare.com" in html or "cf-turnstile" in html:
-                return "turnstile"
-                
-            for marker in self.CHALLENGE_MARKERS:
-                if marker.lower() in html.lower():
-                    return "challenge"
-                    
-            return "clear"
+            html = await page.content()
         except Exception as e:
-            log.error(f"Error detecting challenge: {e}")
-            return "error"
+            return "error", str(e)
 
-    async def _wait_turnstile_token(self, page) -> Optional[str]:
+        if "cf-turnstile-response" in html or "cf-turnstile" in html:
+            return "turnstile", None
+
+        for marker in self.CHALLENGE_MARKERS:
+            if marker.lower() in html.lower():
+                return "challenge", None
+
+        return "clear", None
+
+    async def _wait_turnstile_token(self, page) -> tuple[Optional[str], list, Optional[str]]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout / 1000
-        
-        # انتظار ظهور الـ iframe
-        try:
-            await page.wait_for_selector(self.TURNSTILE_IFRAME, timeout=10000)
-        except Exception:
-            pass
+        last_cookies = []
+        cookie_error = None
 
         while loop.time() < deadline:
             if page.is_closed():
-                return None
-                
+                return None, last_cookies, "Page closed during wait"
+            try:
+                last_cookies = await page.context.cookies()
+            except Exception as e:
+                cookie_error = f"Failed to read cookies: {e}"
+
             try:
                 token = await page.evaluate(
                     f"""
@@ -111,194 +101,185 @@ class CloudflareGate:
                     """
                 )
                 if token and len(token) > 20:
-                    return token
+                    return token, last_cookies, cookie_error
             except Exception:
                 pass
 
-            # محاولة النقر على الـ Checkbox داخل الـ iframe
             try:
                 iframe_element = page.frame_locator(self.TURNSTILE_IFRAME)
                 checkbox = iframe_element.locator("input[type='checkbox']")
                 if await checkbox.count() > 0:
                     await checkbox.first.click(force=True, timeout=2000)
-                    log.info("Clicked Turnstile checkbox inside iframe")
                 else:
                     iframe = page.locator(self.TURNSTILE_IFRAME).first
                     if await iframe.is_visible():
                         await iframe.click(force=True, timeout=2000)
-                        log.info("Clicked Turnstile iframe directly")
             except Exception:
                 pass
 
             await asyncio.sleep(self.poll_interval)
-            
-        return None
 
-    async def _wait_clearance(self, page):
+        return None, last_cookies, "turnstile token timeout"
+
+    async def _wait_clearance(self, page) -> tuple[Optional[str], list, Optional[str]]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout / 1000
-        
+        last_cookies = []
+        cookie_error = None
+
         while loop.time() < deadline:
             if page.is_closed():
-                return None, {}
-                
-            cookies = await page.context.cookies()
-            for c in cookies:
-                if c["name"] == "cf_clearance" and c["value"]:
-                    return c["value"], {ck["name"]: ck["value"] for ck in cookies}
-                    
+                return None, last_cookies, "Page closed during wait"
+            try:
+                last_cookies = await page.context.cookies()
+            except Exception as e:
+                cookie_error = f"Failed to read cookies: {e}"
+
+            for c in last_cookies:
+                if c.get("name") == "cf_clearance" and c.get("value"):
+                    return c["value"], last_cookies, cookie_error
+
             await asyncio.sleep(self.poll_interval)
-            
-        return None, {}
+
+        return None, last_cookies, "cf_clearance timeout"
 
     async def solve(self) -> GateResult:
         kind = "unknown"
-        
+        cleared = False
+        token = None
+        cookie = None
+        final_cookies = []
+        error_msg = None
+        page_url = None
+        page_title = None
+
         try:
             async with self._launch() as browser:
                 page = await browser.new_page()
-                
-                log.info(f"Navigating to {self.url}...")
                 try:
-                    await page.goto(self.url, timeout=60000, wait_until="domcontentloaded")
-                except Exception as nav_err:
-                    return GateResult(cleared=False, error=f"Navigation failed: {nav_err}")
-                    
-                await asyncio.sleep(3)
-                kind = await self._detect_challenge(page)
-                log.info(f"Challenge detected: {kind}")
+                    await page.goto(self.url, timeout=self.timeout)
+                    await asyncio.sleep(2)
 
-                if kind == "turnstile":
-                    token = await self._wait_turnstile_token(page)
-                    if token:
-                        ua = await page.evaluate("navigator.userAgent")
-                        cookies = await page.context.cookies()
-                        jar = {c["name"]: c["value"] for c in cookies}
-                        return GateResult(
-                            cleared=True,
-                            token=token,
-                            user_agent=ua,
-                            cookies=jar,
-                            challenge_type="turnstile",
-                        )
-                    return GateResult(cleared=False, challenge_type="turnstile", error="turnstile token timeout")
+                    kind, detect_err = await self._detect_challenge(page)
 
-                if kind == "challenge":
-                    cookie, jar = await self._wait_clearance(page)
-                    if cookie:
-                        ua = await page.evaluate("navigator.userAgent")
-                        return GateResult(
-                            cleared=True,
-                            cookie=cookie,
-                            user_agent=ua,
-                            cookies=jar,
-                            challenge_type="challenge",
-                        )
-                    return GateResult(cleared=False, challenge_type="challenge", error="cf_clearance timeout")
+                    if kind == "error":
+                        error_msg = f"Detection failed: {detect_err}"
+                    elif kind == "turnstile":
+                        token, final_cookies, wait_err = await self._wait_turnstile_token(page)
+                        if token:
+                            cleared = True
+                            if wait_err:
+                                error_msg = wait_err
+                        else:
+                            error_msg = wait_err
+                    elif kind == "challenge":
+                        cookie, final_cookies, wait_err = await self._wait_clearance(page)
+                        if cookie:
+                            cleared = True
+                            if wait_err:
+                                error_msg = wait_err
+                        else:
+                            error_msg = wait_err
+                    else:
+                        try:
+                            final_cookies = await page.context.cookies()
+                            cleared = True
+                        except Exception as e:
+                            error_msg = f"Failed to read cookies: {e}"
 
-                if kind == "closed":
-                    return GateResult(cleared=False, error="Browser closed unexpectedly")
+                except Exception as exc:
+                    error_msg = str(exc) if not error_msg else f"{error_msg}; {exc}"
+                finally:
+                    if not page.is_closed():
+                        try:
+                            latest = await page.context.cookies()
+                            if latest:
+                                final_cookies = latest
+                        except Exception as e:
+                            if not error_msg:
+                                error_msg = f"Failed final cookie read: {e}"
 
-                # clear
-                ua = await page.evaluate("navigator.userAgent")
-                cookies = await page.context.cookies()
-                return GateResult(
-                    cleared=True,
-                    user_agent=ua,
-                    cookies={c["name"]: c["value"] for c in cookies},
-                    challenge_type="clear",
-                )
-                
+                        page_url = page.url
+                        try:
+                            page_title = await page.title()
+                        except Exception:
+                            pass
+                    elif not error_msg:
+                        error_msg = "Page or browser closed unexpectedly before completion"
+
         except Exception as exc:
-            log.exception("solve failed")
-            return GateResult(cleared=False, error=str(exc))
+            if not error_msg:
+                error_msg = str(exc)
 
-
-class ClearanceSession:
-    """Reuses cf_clearance or a Turnstile token over HTTP with a Chrome TLS fingerprint."""
-    
-    def __init__(self, gate: GateResult, proxy: Optional[str] = None):
-        self.gate = gate
-        self.proxy = proxy
-        self.session = cffi_requests.Session(impersonate="chrome124")
-
-    def _base_headers(self) -> dict:
-        headers = {
-            "User-Agent": self.gate.user_agent or (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        return headers
-
-    def get(self, url: str, **kwargs):
-        headers = self._base_headers()
-        headers.update(kwargs.pop("headers", {}) or {})
-        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        return self.session.get(url, headers=headers, proxies=proxies, timeout=30, **kwargs)
-
-    def post_form(self, url: str, data: dict, **kwargs):
-        headers = self._base_headers()
-        headers.update(kwargs.pop("headers", {}) or {})
-        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        
-        if self.gate.token:
-            data = {**data, "cf-turnstile-response": self.gate.token}
-            
-        return self.session.post(url, data=data, headers=headers, proxies=proxies, timeout=30, **kwargs)
-
+        return GateResult(
+            cleared=cleared,
+            cookie=cookie,
+            token=token,
+            cookies=final_cookies,
+            challenge_type=kind,
+            error=error_msg,
+            page_url=page_url,
+            page_title=page_title
+        )
 
 async def main(
-    target: str,
     proxy: Optional[str] = None,
     headless: bool = True,
-    output: Optional[str] = None,
-):
-    gate = CloudflareGate(target_url=target, proxy=proxy, headless=headless)
+) -> GateResult:
+    gate = CloudflareGate(
+        target_url=TARGET_URL,
+        proxy=proxy,
+        headless=headless,
+    )
     result = await gate.solve()
-
-    if not result.cleared:
-        print(json.dumps({"success": False, "error": result.error, "type": result.challenge_type}))
-        return
-
-    session = ClearanceSession(result, proxy=proxy)
-    
-    # إضافة الكوكيز إلى الجلسة قبل الطلب
-    for name, value in result.cookies.items():
-        session.session.cookies.set(name, value)
-
-    resp = session.get(target)
-    
-    print(json.dumps({
-        "success": resp.status_code < 400,
-        "status_code": resp.status_code,
-        "challenge_type": result.challenge_type,
-        "token": result.token,
-        "cf_clearance": result.cookie,
-        "user_agent": result.user_agent,
-        "cookies": result.cookies,
-    }, ensure_ascii=False, indent=2))
-    
-    if output:
-        with open(output, "w", encoding="utf-8") as fh:
-            json.dump({
-                "token": result.token,
-                "cf_clearance": result.cookie,
-                "user_agent": result.user_agent,
-                "cookies": result.cookies,
-            }, fh, ensure_ascii=False, indent=2)
-        log.info("result written to %s", output)
-
+    return result
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Cloudflare Turnstile / Challenge solver")
-    parser.add_argument("url", help="target URL")
+    parser = argparse.ArgumentParser()
     parser.add_argument("--proxy", default=os.environ.get("CF_PROXY"))
-    parser.add_argument("--headed", action="store_true", help="run browser in headed mode")
-    parser.add_argument("--output", default=None)
+    parser.add_argument("--headed", action="store_true")
     args = parser.parse_args()
 
-    asyncio.run(main(args.url, args.proxy, headless=not args.headed, output=args.output))
+    # يمكنك وضع البروكسي مباشرة هنا إذا لم ترغب بتمريره من سطر الأوامر
+    MY_PROXY = args.proxy or "http://krake73891:kraken@proxies.toolz.ovh:8443"
+
+    result = asyncio.run(main(proxy=MY_PROXY, headless=not args.headed))
+
+    print("\n" + "="*40)
+    print("📊 [FINAL DIAGNOSTIC SUMMARY]")
+    print("="*40)
+    print("Page URL:", result.page_url)
+    print("Page title:", result.page_title)
+    print("Cleared:", result.cleared)
+    print("Challenge type:", result.challenge_type)
+    print("Token present:", bool(result.token))
+    print(
+        "cf_clearance present:",
+        any(
+            c.get("name") == "cf_clearance" and bool(c.get("value"))
+            for c in result.cookies
+        ),
+    )
+    print("Cookie count:", len(result.cookies))
+    print("Error:", result.error)
+    
+    print("\n" + "="*40)
+    print("🔑 [RAW DATA - TOKEN & COOKIES]")
+    print("="*40)
+    
+    # طباعة التوكن الحقيقي
+    print("Token:")
+    print(result.token if result.token else "None (No token found)")
+    
+    print("\nCookies (Name & Value):")
+    if result.cookies:
+        for c in result.cookies:
+            print(f"- {c.get('name')}: {c.get('value')}")
+    else:
+        print("None (No cookies found)")
+        
+    print("\ncf_clearance:")
+    print(result.cookie if result.cookie else "None")
+    print("="*40 + "\n")
