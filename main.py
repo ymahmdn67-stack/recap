@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
 
-TARGET_URL = "https://pureprescriptions.com/my-account/add-payment-method/"
+TARGET_URL = "https://pureprescriptions.com/"
 
 @dataclass
 class GateResult:
@@ -243,8 +243,8 @@ if __name__ == "__main__":
     parser.add_argument("--headed", action="store_true")
     args = parser.parse_args()
 
-    # البروكسي الآن يعتمد فقط على ما يتم تمريره من سطر الأوامر (أو None)
-    MY_PROXY = args.proxy
+    # ✅ تم إرجاع البروكسي هنا في هذه النسخة
+    MY_PROXY = args.proxy or "http://krake73891:kraken@proxies.toolz.ovh:8443"
 
     # ⏱️ بداية العداد
     start_time = time.time()
