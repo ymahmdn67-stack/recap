@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 from camoufox.async_api import AsyncCamoufox
 
 
-TARGET_URL = "https://example.com/"
+TARGET_URL = "https://pureprescriptions.com/my-account/add-payment-method/"
 
 
 @dataclass
