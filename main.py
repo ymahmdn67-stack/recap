@@ -6,9 +6,11 @@ from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
 
+# الرابط المستهدف
+TARGET_URL = "https://pureprescriptions.com/my-account/"
 
-TARGET_URL = "https://pureprescriptions.com/my-account/add-payment-method/"
-
+# إعدادات البروكسي الخاص بك
+PROXY_URL = "http://krake73891:kraken@proxies.toolz.ovh:8443"
 
 @dataclass
 class GateResult:
@@ -51,12 +53,25 @@ class CloudflareGate:
 
     def _launch(self):
         options = {"headless": self.headless}
+        
         if self.proxy:
-            options["proxy"] = {"server": self.proxy}
+            # تحليل الرابط لاستخراج البيانات بالشكل الذي يفهمه Camoufox/Playwright
+            parsed_proxy = urlparse(self.proxy)
+            proxy_config = {
+                "server": f"{parsed_proxy.scheme}://{parsed_proxy.hostname}:{parsed_proxy.port}"
+            }
+            if parsed_proxy.username and parsed_proxy.password:
+                proxy_config["username"] = parsed_proxy.username
+                proxy_config["password"] = parsed_proxy.password
+                
+            options["proxy"] = proxy_config
+            print(f"🌐 [PROXY] Connecting via: {proxy_config['server']}")
+            
         return AsyncCamoufox(**options)
 
     async def _detect_challenge(self, page) -> str:
         html = (await page.content()) or ""
+
         if "challenges.cloudflare.com" in html or "cf-turnstile" in html:
             return "turnstile"
 
@@ -70,7 +85,14 @@ class CloudflareGate:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.timeout / 1000
 
+        # انتظار ظهور الـ iframe (حتى 10 ثواني)
+        try:
+            await page.wait_for_selector(self.TURNSTILE_IFRAME, timeout=10000)
+        except Exception:
+            pass
+
         while loop.time() < deadline:
+            # 1. محاولة سحب التوكن من الـ DOM
             try:
                 token = await page.evaluate(
                     f"""
@@ -82,23 +104,18 @@ class CloudflareGate:
                     """
                 )
                 if token and len(token) > 20:
+                    print("✅ [TURNSTILE] Token extracted successfully!")
                     return token
             except Exception:
                 pass
 
+            # 2. محاولة النقر على مربع الاختيار (Checkbox) باستخدام Locator
             try:
-                clicked = await page.evaluate(
-                    f"""
-                    (() => {{
-                        const iframe = document.querySelector("{self.TURNSTILE_IFRAME}");
-                        if (!iframe) return false;
-                        const rect = iframe.getBoundingClientRect();
-                        return {{x: rect.x + rect.width / 2, y: rect.y + rect.height / 2}};
-                    }})()
-                    """
-                )
-                if clicked and isinstance(clicked, dict):
-                    await page.mouse.click(clicked["x"], clicked["y"])
+                iframe_locator = page.locator(self.TURNSTILE_IFRAME).first
+                if await iframe_locator.is_visible():
+                    # النقر بقوة (force=True) لتجاوز أي تداخل في العناصر
+                    await iframe_locator.click(force=True, timeout=2000)
+                    print("🖱️ [TURNSTILE] Clicked on the iframe...")
             except Exception:
                 pass
 
@@ -129,10 +146,15 @@ class CloudflareGate:
         try:
             async with self._launch() as browser:
                 page = await browser.new_page()
-                await page.goto(self.url)
-                await asyncio.sleep(2)
+                print(f"🚀 [NAVIGATING] Going to {self.url}")
+                await page.goto(self.url, timeout=45000)
+                await asyncio.sleep(3) # انتظار إضافي لتحميل السكربتات
 
                 kind = await self._detect_challenge(page)
+
+                print("📄 Page URL:", page.url)
+                print("📝 Page title:", await page.title())
+                print(f"🛡️ Challenge type detected: {kind}")
 
                 if kind == "turnstile":
                     token = await self._wait_turnstile_token(page)
@@ -190,32 +212,25 @@ class CloudflareGate:
             )
 
 
-async def main(
-    proxy: Optional[str] = None,
-    headless: bool = True,
-) -> GateResult:
+async def main() -> GateResult:
     gate = CloudflareGate(
         target_url=TARGET_URL,
-        proxy=proxy,
-        headless=headless,
+        proxy=PROXY_URL,   # تم تمرير البروكسي هنا
+        headless=True,     # يفضل True في السيرفرات، وإذا كنت على جهازك اجعلها False لتشاهد المتصفح
     )
     result = await gate.solve()
     return result
 
 
 if __name__ == "__main__":
-    import argparse
+    result = asyncio.run(main())
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--proxy", default=os.environ.get("CF_PROXY"))
-    parser.add_argument("--headed", action="store_true")
-    args = parser.parse_args()
-
-    result = asyncio.run(main(proxy=args.proxy, headless=not args.headed))
-
+    print("\n" + "="*30)
+    print("📊 [FINAL RESULT]")
+    print("="*30)
     print("Cleared:", result.cleared)
     print("Challenge type:", result.challenge_type)
     print("Token present:", bool(result.token))
     print("cf_clearance present:", bool(result.cookies.get("cf_clearance")))
     print("Cookie count:", len(result.cookies))
-    print("Error:", result.error)
+    print("Error:", result.error if result.error else "None")
