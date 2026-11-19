@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
 
-TARGET_URL = "https://pureprescriptions.com/"
+TARGET_URL = "https://pureprescriptions.com/my-account/add-payment-method/"
 
 @dataclass
 class GateResult:
@@ -59,7 +59,12 @@ class CloudflareGate:
             if parsed_proxy.username and parsed_proxy.password:
                 proxy_config["username"] = parsed_proxy.username
                 proxy_config["password"] = parsed_proxy.password
+            
             options["proxy"] = proxy_config
+            
+            # ✅ إضافة geoip لحل مشكلة about:blank وضبط المنطقة الزمنية
+            options["geoip"] = True
+            
         return AsyncCamoufox(**options)
 
     async def _detect_challenge(self, page) -> tuple[str, Optional[str]]:
@@ -158,7 +163,8 @@ class CloudflareGate:
             async with self._launch() as browser:
                 page = await browser.new_page()
                 try:
-                    await page.goto(self.url, timeout=self.timeout)
+                    # تقليل وقت انتظار تحميل الصفحة إلى 15 ثانية كحد أقصى إذا كان البروكسي ميتاً
+                    await page.goto(self.url, timeout=15000)
                     await asyncio.sleep(2)
 
                     kind, detect_err = await self._detect_challenge(page)
@@ -243,8 +249,8 @@ if __name__ == "__main__":
     parser.add_argument("--headed", action="store_true")
     args = parser.parse_args()
 
-    # ✅ تم إرجاع البروكسي هنا في هذه النسخة
-    MY_PROXY = None
+    MY_PROXY = args.proxy or "http://krake73891:kraken@proxies.toolz.ovh:8443"
+
     # ⏱️ بداية العداد
     start_time = time.time()
 
