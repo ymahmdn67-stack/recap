@@ -250,8 +250,7 @@ if __name__ == "__main__":
     parser.add_argument("--headed", action="store_true")
     args = parser.parse_args()
 
-    MY_PROXY = args.proxy or "http://krake73891:kraken@proxies.toolz.ovh:8443"
-
+    MY_PROXY = None
     start_time = time.time()
     result = asyncio.run(main(proxy=MY_PROXY, headless=not args.headed))
     end_time = time.time()
