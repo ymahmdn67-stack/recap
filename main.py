@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from camoufox.async_api import AsyncCamoufox
 
-TARGET_URL = "https://pureprescriptions.com/my-account/add-payment-method/"
+TARGET_URL = "https://pureprescriptions.com/"
 
 @dataclass
 class GateResult:
@@ -59,10 +59,7 @@ class CloudflareGate:
             if parsed_proxy.username and parsed_proxy.password:
                 proxy_config["username"] = parsed_proxy.username
                 proxy_config["password"] = parsed_proxy.password
-            
             options["proxy"] = proxy_config
-            options["geoip"] = True
-            
         return AsyncCamoufox(**options)
 
     async def _detect_challenge(self, page) -> tuple[str, Optional[str]]:
@@ -159,13 +156,9 @@ class CloudflareGate:
 
         try:
             async with self._launch() as browser:
-                # إضافة ignore_https_errors لتجاوز حماية الشهادات في البروكسي
-                context = await browser.new_context(ignore_https_errors=True)
-                page = await context.new_page()
-                
+                page = await browser.new_page()
                 try:
-                    # إعادة المهلة إلى 60 ثانية، والاكتفاء بتحميل الـ HTML
-                    await page.goto(self.url, timeout=60000, wait_until="domcontentloaded")
+                    await page.goto(self.url, timeout=self.timeout)
                     await asyncio.sleep(2)
 
                     kind, detect_err = await self._detect_challenge(page)
@@ -250,9 +243,14 @@ if __name__ == "__main__":
     parser.add_argument("--headed", action="store_true")
     args = parser.parse_args()
 
+    # ✅ تم إرجاع البروكسي هنا في هذه النسخة
     MY_PROXY = None
+    # ⏱️ بداية العداد
     start_time = time.time()
+
     result = asyncio.run(main(proxy=MY_PROXY, headless=not args.headed))
+
+    # ⏱️ نهاية العداد وحساب الفارق
     end_time = time.time()
     elapsed_time = end_time - start_time
 
