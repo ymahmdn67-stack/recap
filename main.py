@@ -61,8 +61,6 @@ class CloudflareGate:
                 proxy_config["password"] = parsed_proxy.password
             
             options["proxy"] = proxy_config
-            
-            # ✅ إضافة geoip لحل مشكلة about:blank وضبط المنطقة الزمنية
             options["geoip"] = True
             
         return AsyncCamoufox(**options)
@@ -161,10 +159,13 @@ class CloudflareGate:
 
         try:
             async with self._launch() as browser:
-                page = await browser.new_page()
+                # إضافة ignore_https_errors لتجاوز حماية الشهادات في البروكسي
+                context = await browser.new_context(ignore_https_errors=True)
+                page = await context.new_page()
+                
                 try:
-                    # تقليل وقت انتظار تحميل الصفحة إلى 15 ثانية كحد أقصى إذا كان البروكسي ميتاً
-                    await page.goto(self.url, timeout=15000)
+                    # إعادة المهلة إلى 60 ثانية، والاكتفاء بتحميل الـ HTML
+                    await page.goto(self.url, timeout=60000, wait_until="domcontentloaded")
                     await asyncio.sleep(2)
 
                     kind, detect_err = await self._detect_challenge(page)
@@ -251,12 +252,8 @@ if __name__ == "__main__":
 
     MY_PROXY = args.proxy or "http://krake73891:kraken@proxies.toolz.ovh:8443"
 
-    # ⏱️ بداية العداد
     start_time = time.time()
-
     result = asyncio.run(main(proxy=MY_PROXY, headless=not args.headed))
-
-    # ⏱️ نهاية العداد وحساب الفارق
     end_time = time.time()
     elapsed_time = end_time - start_time
 
